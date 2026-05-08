@@ -1,5 +1,5 @@
 {
-  "version": "1.0.4",
-  "changelog": "🆕 新增 Claude Opus 4.7（claude-opus-4-7 → claude-opus-4.7，1M 上下文）\n🆕 新增 KIRO_API_KEY 凭据类型（Kiro CLI headless 模式），支持环境变量自动注入\n⬆️ KiroIDE/aws-sdk-js/Node 版本号同步至上游 (0.11.107 / 1.0.34 / 22.22.0)\n🛠 工具名 >63 字符自动 sha256 缩短并保留映射回写，避免 Kiro 拒绝长 MCP 工具\n📐 Sonnet 4.6 / Opus 4.6 识别为 1M 上下文窗口，其它维持 200K\n🔁 401/403 自动单次刷新 token 重试，单凭据本地修复不影响其他账号\n🚫 refreshToken 命中 invalid_grant 时立即禁用账号，不再累计重试\n🔐 profile_arn 由 provider 端动态注入并随 token 刷新同步更新\n🧠 非流式响应合并 reasoningContentEvent 与 <thinking> 标签，避免内容丢失",
+  "version": "1.0.5",
+  "changelog": "🧠 修复请求体 thinking 字段被忽略：现支持 Anthropic 标准的 {type:enabled,budget_tokens} 与 {type:adaptive,effort} 两种触发方式\n🧠 OpenAI 路径新增 reasoning_effort 字段识别 (low/medium/high)，兼容 o-series 客户端\n🧠 thinking 提示按预算/effort 动态生成（max_thinking_length 实时计算），对齐 AIClient2API/Kiro CLI 行为\n🆕 新增 Claude Opus 4.7（claude-opus-4-7 → claude-opus-4.7，1M 上下文）\n🆕 新增 KIRO_API_KEY 凭据类型（Kiro CLI headless 模式），支持环境变量自动注入\n⬆️ KiroIDE/aws-sdk-js/Node 版本号同步至上游 (0.11.107 / 1.0.34 / 22.22.0)\n🛠 工具名 >63 字符自动 sha256 缩短并保留映射回写，避免 Kiro 拒绝长 MCP 工具\n📐 Sonnet 4.6 / Opus 4.6 识别为 1M 上下文窗口，其它维持 200K\n🔁 401/403 自动单次刷新 token 重试，单凭据本地修复不影响其他账号\n🚫 refreshToken 命中 invalid_grant 时立即禁用账号，不再累计重试\n🔐 profile_arn 由 provider 端动态注入并随 token 刷新同步更新\n🧠 非流式响应合并 reasoningContentEvent 与 <thinking> 标签，避免内容丢失",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }

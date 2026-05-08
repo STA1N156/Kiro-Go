@@ -51,7 +51,7 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 		},
 	}
 
-	payload := OpenAIToKiro(req, false)
+	payload := OpenAIToKiro(req, "")
 
 	if len(payload.ConversationState.History) != 2 {
 		t.Fatalf("expected 2 history items, got %d", len(payload.ConversationState.History))
@@ -98,7 +98,7 @@ func TestOpenAIToKiroAssistantMapContentInHistory(t *testing.T) {
 		},
 	}
 
-	payload := OpenAIToKiro(req, false)
+	payload := OpenAIToKiro(req, "")
 
 	if len(payload.ConversationState.History) != 2 {
 		t.Fatalf("expected 2 history entries, got %d", len(payload.ConversationState.History))
@@ -133,7 +133,7 @@ func TestOpenAIToKiroAssistantToolCallsDoNotInjectPlaceholder(t *testing.T) {
 		},
 	}
 
-	payload := OpenAIToKiro(req, false)
+	payload := OpenAIToKiro(req, "")
 	if len(payload.ConversationState.History) < 2 {
 		t.Fatalf("expected history with assistant tool call")
 	}
@@ -157,8 +157,8 @@ func TestOpenAIConversationIDStableFromAnchor(t *testing.T) {
 	reqA := &OpenAIRequest{Model: "claude-sonnet-4.5", Messages: baseMessages}
 	reqB := &OpenAIRequest{Model: "claude-sonnet-4.5", Messages: append(baseMessages, OpenAIMessage{Role: "assistant", Content: "Next step"})}
 
-	payloadA := OpenAIToKiro(reqA, false)
-	payloadB := OpenAIToKiro(reqB, false)
+	payloadA := OpenAIToKiro(reqA, "")
+	payloadB := OpenAIToKiro(reqB, "")
 
 	if payloadA.ConversationState.ConversationID == "" || payloadB.ConversationState.ConversationID == "" {
 		t.Fatalf("expected non-empty conversation IDs")
@@ -186,8 +186,8 @@ func TestClaudeConversationIDStableFromAnchor(t *testing.T) {
 		},
 	}
 
-	payloadA := ClaudeToKiro(reqA, false)
-	payloadB := ClaudeToKiro(reqB, false)
+	payloadA := ClaudeToKiro(reqA, "")
+	payloadB := ClaudeToKiro(reqB, "")
 
 	if payloadA.ConversationState.ConversationID == "" || payloadB.ConversationState.ConversationID == "" {
 		t.Fatalf("expected non-empty conversation IDs")
@@ -219,5 +219,118 @@ func TestGetContextWindowSize1MModels(t *testing.T) {
 	}
 	if got := GetContextWindowSize("claude-opus-4-5"); got != 200_000 {
 		t.Fatalf("GetContextWindowSize(opus-4.5) = %d, want 200_000", got)
+	}
+}
+
+func TestResolveClaudeThinkingFromBodyEnabled(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:    "claude-opus-4-5",
+		Thinking: &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 8000},
+	}
+	mapped, prompt := ResolveClaudeThinking(req, "-thinking")
+	if mapped != "claude-opus-4.5" {
+		t.Fatalf("model = %q, want claude-opus-4.5", mapped)
+	}
+	if prompt == "" {
+		t.Fatal("expected non-empty prompt")
+	}
+	if !strings.Contains(prompt, "<thinking_mode>enabled</thinking_mode>") {
+		t.Fatalf("missing enabled tag: %q", prompt)
+	}
+	if !strings.Contains(prompt, "<max_thinking_length>8000</max_thinking_length>") {
+		t.Fatalf("budget not applied: %q", prompt)
+	}
+}
+
+func TestResolveClaudeThinkingFromBodyAdaptive(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-4-6",
+		Thinking: &ClaudeThinkingConfig{Type: "adaptive", Effort: "medium"},
+	}
+	_, prompt := ResolveClaudeThinking(req, "-thinking")
+	if !strings.Contains(prompt, "<thinking_mode>adaptive</thinking_mode>") {
+		t.Fatalf("missing adaptive tag: %q", prompt)
+	}
+	if !strings.Contains(prompt, "<thinking_effort>medium</thinking_effort>") {
+		t.Fatalf("effort not applied: %q", prompt)
+	}
+}
+
+func TestResolveClaudeThinkingDisabledOverridesSuffix(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:    "claude-opus-4-5-thinking",
+		Thinking: &ClaudeThinkingConfig{Type: "disabled"},
+	}
+	_, prompt := ResolveClaudeThinking(req, "-thinking")
+	if prompt != "" {
+		t.Fatalf("disabled should win over suffix; got %q", prompt)
+	}
+}
+
+func TestResolveClaudeThinkingFallsBackToSuffix(t *testing.T) {
+	req := &ClaudeRequest{Model: "claude-opus-4-5-thinking"}
+	mapped, prompt := ResolveClaudeThinking(req, "-thinking")
+	if mapped != "claude-opus-4.5" {
+		t.Fatalf("suffix not stripped: %q", mapped)
+	}
+	if prompt == "" {
+		t.Fatalf("suffix should enable thinking with default prompt")
+	}
+}
+
+func TestResolveOpenAIThinkingFromReasoningEffort(t *testing.T) {
+	req := &OpenAIRequest{Model: "claude-sonnet-4-6", ReasoningEffort: "high"}
+	_, prompt := ResolveOpenAIThinking(req, "-thinking")
+	if !strings.Contains(prompt, "<thinking_mode>adaptive</thinking_mode>") {
+		t.Fatalf("expected adaptive: %q", prompt)
+	}
+	if !strings.Contains(prompt, "<thinking_effort>high</thinking_effort>") {
+		t.Fatalf("expected effort=high: %q", prompt)
+	}
+}
+
+func TestClaudeToKiroInjectsThinkingPrompt(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:    "claude-opus-4-5",
+		System:   "你是助手",
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+	prompt := "<thinking_mode>enabled</thinking_mode><max_thinking_length>5000</max_thinking_length>"
+	payload := ClaudeToKiro(req, prompt)
+	content := payload.ConversationState.CurrentMessage.UserInputMessage.Content
+	if !strings.Contains(content, "<thinking_mode>enabled</thinking_mode>") {
+		t.Fatalf("missing thinking_mode tag in current message content: %q", content)
+	}
+	if !strings.Contains(content, "<max_thinking_length>5000</max_thinking_length>") {
+		t.Fatalf("budget not in prompt: %q", content)
+	}
+}
+
+func TestResolveAndConvertEndToEnd(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:    "claude-opus-4-5",
+		System:   "你是助手",
+		Thinking: &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 12000},
+		Messages: []ClaudeMessage{{Role: "user", Content: "证明哥德巴赫猜想"}},
+	}
+	mappedModel, prompt := ResolveClaudeThinking(req, "-thinking")
+	req.Model = mappedModel
+	if prompt == "" {
+		t.Fatal("body.thinking failed to resolve a prompt")
+	}
+	payload := ClaudeToKiro(req, prompt)
+	content := payload.ConversationState.CurrentMessage.UserInputMessage.Content
+	for _, must := range []string{
+		"<thinking_mode>enabled</thinking_mode>",
+		"<max_thinking_length>12000</max_thinking_length>",
+		"你是助手",
+		"证明哥德巴赫猜想",
+	} {
+		if !strings.Contains(content, must) {
+			t.Fatalf("missing fragment %q in payload content:\n%s", must, content)
+		}
+	}
+	if payload.ConversationState.CurrentMessage.UserInputMessage.ModelID != "claude-opus-4.5" {
+		t.Fatalf("modelId mismatch: %q", payload.ConversationState.CurrentMessage.UserInputMessage.ModelID)
 	}
 }

@@ -460,14 +460,15 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 解析模型和 thinking 模式
+	// 解析模型和 thinking 模式：综合考量请求体 thinking 字段与模型名后缀
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	actualModel, thinkingPrompt := ResolveClaudeThinking(&req, thinkingCfg.Suffix)
 	req.Model = actualModel
+	thinking := thinkingPrompt != ""
 	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
 
 	// 转换请求
-	kiroPayload := ClaudeToKiro(&req, thinking)
+	kiroPayload := ClaudeToKiro(&req, thinkingPrompt)
 
 	// 流式或非流式
 	if req.Stream {
@@ -1057,13 +1058,14 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 解析模型和 thinking 模式
+	// 解析模型和 thinking 模式：综合考量 reasoning_effort 字段与模型名后缀
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	actualModel, thinkingPrompt := ResolveOpenAIThinking(&req, thinkingCfg.Suffix)
 	req.Model = actualModel
+	thinking := thinkingPrompt != ""
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
-	kiroPayload := OpenAIToKiro(&req, thinking)
+	kiroPayload := OpenAIToKiro(&req, thinkingPrompt)
 
 	if req.Stream {
 		h.handleOpenAIStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)

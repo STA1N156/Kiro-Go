@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -41,20 +42,74 @@ var modelMapOrdered = []modelMapping{
 	{"gpt-3.5-turbo", "claude-sonnet-4.5"},
 }
 
-// Thinking 模式提示
-const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>`
+// thinking 预算上下界（与 AIClient2API/Kiro CLI 保持一致）
+const (
+	defaultThinkingBudget = 200_000
+	minThinkingBudget     = 1024
+	maxThinkingBudget     = 200_000
+)
+
+// ClaudeThinkingConfig 对应 Anthropic API 请求体里的 thinking 字段。
+//
+// Type:
+//   - "enabled":  显式启用，配合 BudgetTokens 限制思考预算
+//   - "adaptive": 自适应思考，配合 Effort (low/medium/high)
+//   - "disabled": 显式关闭
+type ClaudeThinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	Effort       string `json:"effort,omitempty"`
+}
+
+// buildThinkingPrompt 根据 thinking 配置构造注入到 system prompt 的前缀。
+//
+// 返回空串表示不应注入。算法对齐 AIClient2API/claude-kiro.js::_generateThinkingPrefix。
+func buildThinkingPrompt(t *ClaudeThinkingConfig) string {
+	if t == nil {
+		return ""
+	}
+	kind := strings.ToLower(strings.TrimSpace(t.Type))
+	switch kind {
+	case "enabled":
+		budget := t.BudgetTokens
+		if budget <= 0 {
+			budget = defaultThinkingBudget
+		}
+		if budget < minThinkingBudget {
+			budget = minThinkingBudget
+		}
+		if budget > maxThinkingBudget {
+			budget = maxThinkingBudget
+		}
+		return fmt.Sprintf("<thinking_mode>enabled</thinking_mode><max_thinking_length>%d</max_thinking_length>", budget)
+	case "adaptive":
+		effort := strings.ToLower(strings.TrimSpace(t.Effort))
+		if effort != "low" && effort != "medium" && effort != "high" {
+			effort = "high"
+		}
+		return fmt.Sprintf("<thinking_mode>adaptive</thinking_mode><thinking_effort>%s</thinking_effort>", effort)
+	}
+	return ""
+}
+
+// ThinkingModePrompt 旧常量，保留作为默认 enabled 模式的回退。
+//
+// 仅用于历史调用点，新代码请使用 buildThinkingPrompt。
+const ThinkingModePrompt = "<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>200000</max_thinking_length>"
 
 const minimalFallbackUserContent = "."
 
-// ParseModelAndThinking 解析模型名称，返回实际模型和是否启用 thinking
+// ParseModelAndThinking 解析模型名称中的 thinking 后缀。
+//
+// 返回的 thinking bool 仅基于模型名后缀。完整的"是否启用 thinking"应使用
+// ResolveClaudeThinking 同时考虑请求体中的 thinking 字段。
 func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	lower := strings.ToLower(model)
 	thinking := false
 
 	// 使用配置的后缀检查
 	suffixLower := strings.ToLower(thinkingSuffix)
-	if strings.HasSuffix(lower, suffixLower) {
+	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
 		thinking = true
 		model = model[:len(model)-len(thinkingSuffix)]
 		lower = strings.ToLower(model)
@@ -73,6 +128,51 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	}
 
 	return "claude-sonnet-4.5", thinking
+}
+
+// ResolveClaudeThinking 综合判定 Claude 请求是否应启用 thinking。
+//
+// 信号优先级：
+//  1. 请求体 thinking 字段为 "disabled" → 显式关闭
+//  2. 请求体 thinking 字段为 "enabled" / "adaptive" → 启用，使用其 prompt
+//  3. 模型名带 thinking 后缀 → 启用，使用默认 enabled prompt
+//
+// 返回值: (mappedModel, prompt)。prompt 为空表示不启用。
+func ResolveClaudeThinking(req *ClaudeRequest, suffix string) (string, string) {
+	mappedModel, suffixThinking := ParseModelAndThinking(req.Model, suffix)
+
+	if req.Thinking != nil {
+		if strings.EqualFold(strings.TrimSpace(req.Thinking.Type), "disabled") {
+			return mappedModel, ""
+		}
+		if p := buildThinkingPrompt(req.Thinking); p != "" {
+			return mappedModel, p
+		}
+	}
+
+	if suffixThinking {
+		return mappedModel, buildThinkingPrompt(&ClaudeThinkingConfig{Type: "enabled"})
+	}
+	return mappedModel, ""
+}
+
+// ResolveOpenAIThinking 综合判定 OpenAI 请求是否应启用 thinking。
+//
+// 兼容 reasoning_effort（OpenAI o-series）和模型名 thinking 后缀两种触发方式。
+func ResolveOpenAIThinking(req *OpenAIRequest, suffix string) (string, string) {
+	mappedModel, suffixThinking := ParseModelAndThinking(req.Model, suffix)
+
+	if effort := strings.ToLower(strings.TrimSpace(req.ReasoningEffort)); effort != "" {
+		if effort == "none" || effort == "off" || effort == "disabled" {
+			return mappedModel, ""
+		}
+		return mappedModel, buildThinkingPrompt(&ClaudeThinkingConfig{Type: "adaptive", Effort: effort})
+	}
+
+	if suffixThinking {
+		return mappedModel, buildThinkingPrompt(&ClaudeThinkingConfig{Type: "enabled"})
+	}
+	return mappedModel, ""
 }
 
 func MapModel(model string) string {
@@ -94,15 +194,16 @@ func GetContextWindowSize(model string) int {
 // ==================== Claude API 类型 ====================
 
 type ClaudeRequest struct {
-	Model       string          `json:"model"`
-	Messages    []ClaudeMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	System      interface{}     `json:"system,omitempty"` // string or []SystemBlock
-	Tools       []ClaudeTool    `json:"tools,omitempty"`
-	ToolChoice  interface{}     `json:"tool_choice,omitempty"`
+	Model       string                `json:"model"`
+	Messages    []ClaudeMessage       `json:"messages"`
+	MaxTokens   int                   `json:"max_tokens"`
+	Temperature float64               `json:"temperature,omitempty"`
+	TopP        float64               `json:"top_p,omitempty"`
+	Stream      bool                  `json:"stream,omitempty"`
+	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
+	Tools       []ClaudeTool          `json:"tools,omitempty"`
+	ToolChoice  interface{}           `json:"tool_choice,omitempty"`
+	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"` // Anthropic extended thinking
 }
 
 type ClaudeMessage struct {
@@ -154,16 +255,20 @@ type ClaudeUsage struct {
 
 const maxToolDescLen = 10237
 
-func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
+func ClaudeToKiro(req *ClaudeRequest, thinkingPrompt string) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
 
 	// 提取系统提示
 	systemPrompt := extractSystemPrompt(req.System)
 
-	// 如果启用 thinking 模式，注入 thinking 提示
-	if thinking {
-		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
+	// 注入 thinking 提示（已由 ResolveClaudeThinking 计算好完整 prompt）
+	if thinkingPrompt != "" && !strings.Contains(systemPrompt, "<thinking_mode>") {
+		if systemPrompt == "" {
+			systemPrompt = thinkingPrompt
+		} else {
+			systemPrompt = thinkingPrompt + "\n\n" + systemPrompt
+		}
 	}
 
 	// 构建历史消息
@@ -501,13 +606,14 @@ func KiroToClaudeResponse(content, thinkingContent string, toolUses []KiroToolUs
 // ==================== OpenAI API 类型 ====================
 
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []OpenAIMessage `json:"messages"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
+	Temperature     float64         `json:"temperature,omitempty"`
+	TopP            float64         `json:"top_p,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	Tools           []OpenAITool    `json:"tools,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"` // o-series: low/medium/high
 }
 
 type OpenAIMessage struct {
@@ -558,7 +664,7 @@ type OpenAIUsage struct {
 
 // ==================== OpenAI -> Kiro 转换 ====================
 
-func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
+func OpenAIToKiro(req *OpenAIRequest, thinkingPrompt string) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
 
@@ -576,9 +682,13 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	// 如果启用 thinking 模式，注入 thinking 提示
-	if thinking {
-		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
+	// 注入 thinking 提示（已由 ResolveOpenAIThinking 计算好完整 prompt）
+	if thinkingPrompt != "" && !strings.Contains(systemPrompt, "<thinking_mode>") {
+		if systemPrompt == "" {
+			systemPrompt = thinkingPrompt
+		} else {
+			systemPrompt = thinkingPrompt + "\n\n" + systemPrompt
+		}
 	}
 
 	// 构建历史消息
