@@ -11,6 +11,7 @@ import (
 )
 
 const kiroRestAPIBase = "https://codewhisperer.us-east-1.amazonaws.com"
+const standardUsageLimit = 1000.0
 const overageEnabledUsageLimit = 10000.0
 
 // GetUsageLimits 获取账户使用量和订阅信息
@@ -217,7 +218,7 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	if len(usage.UsageBreakdownList) > 0 {
 		breakdown := usage.UsageBreakdownList[0]
 		info.UsageCurrent = breakdown.CurrentUsage
-		info.UsageLimit = normalizedUsageLimit(breakdown)
+		info.UsageLimit = normalizedUsageLimit(breakdown, account.OverageEnabled)
 		if info.UsageLimit > 0 {
 			info.UsagePercent = info.UsageCurrent / info.UsageLimit
 		}
@@ -271,23 +272,14 @@ func parseSubscriptionType(raw string) string {
 	return "FREE"
 }
 
-func normalizedUsageLimit(breakdown UsageBreakdown) float64 {
-	if isOverageEnabled(breakdown) && breakdown.UsageLimit < overageEnabledUsageLimit {
+func normalizedUsageLimit(breakdown UsageBreakdown, overageEnabled bool) float64 {
+	if overageEnabled && breakdown.UsageLimit < overageEnabledUsageLimit {
 		return overageEnabledUsageLimit
 	}
+	if !overageEnabled && breakdown.UsageLimit >= overageEnabledUsageLimit {
+		return standardUsageLimit
+	}
 	return breakdown.UsageLimit
-}
-
-func isOverageEnabled(breakdown UsageBreakdown) bool {
-	if breakdown.OverageEnabled || breakdown.IsOverageEnabled {
-		return true
-	}
-	if breakdown.Overages > 0 {
-		return true
-	}
-
-	status := strings.ToUpper(strings.TrimSpace(breakdown.OverageStatus))
-	return strings.Contains(status, "ENABLED") || strings.Contains(status, "ACTIVE")
 }
 
 // 响应结构体
@@ -305,11 +297,6 @@ type UsageBreakdown struct {
 	Currency          string         `json:"currency"`
 	Unit              string         `json:"unit"`
 	OverageRate       float64        `json:"overageRate"`
-	OverageCap        float64        `json:"overageCap"`
-	Overages          float64        `json:"overages"`
-	OverageEnabled    bool           `json:"overageEnabled"`
-	IsOverageEnabled  bool           `json:"isOverageEnabled"`
-	OverageStatus     string         `json:"overageStatus"`
 	FreeTrialInfo     *FreeTrialInfo `json:"freeTrialInfo"`
 	Bonuses           []BonusInfo    `json:"bonuses"`
 }

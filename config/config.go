@@ -73,6 +73,7 @@ type Account struct {
 	UsagePercent  float64 `json:"usagePercent,omitempty"`  // Usage percentage (0.0-1.0)
 	NextResetDate string  `json:"nextResetDate,omitempty"` // Date when usage resets (YYYY-MM-DD)
 	LastRefresh   int64   `json:"lastRefresh,omitempty"`   // Last info refresh timestamp
+	OverageEnabled bool   `json:"overageEnabled,omitempty"` // Manually mark account as overage-enabled
 
 	// Trial usage tracking
 	TrialUsageCurrent float64 `json:"trialUsageCurrent,omitempty"` // Trial quota current usage

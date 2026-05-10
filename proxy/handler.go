@@ -1866,6 +1866,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"usageCurrent":      a.UsageCurrent,
 			"usageLimit":        a.UsageLimit,
 			"usagePercent":      a.UsagePercent,
+			"overageEnabled":    a.OverageEnabled,
 			"nextResetDate":     a.NextResetDate,
 			"lastRefresh":       a.LastRefresh,
 			"trialUsageCurrent": a.TrialUsageCurrent,
@@ -1953,6 +1954,18 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["weight"].(float64); ok {
 		existing.Weight = int(v)
+	}
+	if v, ok := updates["overageEnabled"].(bool); ok {
+		existing.OverageEnabled = v
+		if v && existing.UsageLimit < overageEnabledUsageLimit {
+			existing.UsageLimit = overageEnabledUsageLimit
+		}
+		if !v && existing.UsageLimit >= overageEnabledUsageLimit {
+			existing.UsageLimit = standardUsageLimit
+		}
+		if existing.UsageLimit > 0 {
+			existing.UsagePercent = existing.UsageCurrent / existing.UsageLimit
+		}
 	}
 
 	if err := config.UpdateAccount(id, *existing); err != nil {
@@ -2669,6 +2682,7 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"usageCurrent":      account.UsageCurrent,
 		"usageLimit":        account.UsageLimit,
 		"usagePercent":      account.UsagePercent,
+		"overageEnabled":    account.OverageEnabled,
 		"nextResetDate":     account.NextResetDate,
 		"lastRefresh":       account.LastRefresh,
 		"trialUsageCurrent": account.TrialUsageCurrent,

@@ -1114,6 +1114,9 @@
                 'accounts.trialToday': '今天到期',
                 'accounts.copyJSON': '复制 JSON',
                 'accounts.copyJSONSuccess': 'JSON 已复制到剪贴板',
+                'accounts.overageOn': '超限已开',
+                'accounts.overageOff': '标记超限',
+                'accounts.overageBadge': '超限',
                 'accounts.trialDays': '天后到期',
                 'time.expired': '已过期',
                 'time.minutes': '分钟',
@@ -1321,6 +1324,9 @@
                 'accounts.confirmDelete': 'Confirm delete?',
                 'accounts.copyJSON': 'Copy JSON',
                 'accounts.copyJSONSuccess': 'JSON copied to clipboard',
+                'accounts.overageOn': 'Overage on',
+                'accounts.overageOff': 'Mark overage',
+                'accounts.overageBadge': 'Overage',
                 'time.expired': 'Expired',
                 'time.minutes': 'min',
                 'time.hours': 'hr',
@@ -1758,6 +1764,7 @@
                     '<div class="account-meta">' +
                     getSubBadge(a.subscriptionType) +
                     getTrialBadge(a) +
+                    getOverageBadge(a) +
                     weightBadge +
                     '<span class="badge badge-info">' + formatAuthMethod(a.provider || a.authMethod) + '</span>' +
                     getStatusBadge(a) +
@@ -1768,6 +1775,7 @@
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="refreshAccount(\'' + a.id + '\')" title="' + t('accounts.refresh') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></button>' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="showDetail(\'' + a.id + '\')" title="' + t('accounts.detail') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="copyAccountJSON(\'' + a.id + '\', this)" title="' + t('accounts.copyJSON') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>' +
+                    '<button class="btn btn-sm ' + (a.overageEnabled ? 'btn-success' : 'btn-secondary') + '" onclick="toggleOverage(\'' + a.id + '\',' + !a.overageEnabled + ')">' + (a.overageEnabled ? t('accounts.overageOn') : t('accounts.overageOff')) + '</button>' +
                     (a.banStatus && a.banStatus !== 'ACTIVE' ? '' :
                         '<button class="btn btn-sm ' + (a.enabled ? 'btn-secondary' : 'btn-primary') + '" onclick="toggleAccount(\'' + a.id + '\',' + !a.enabled + ')">' + (a.enabled ? t('accounts.disable') : t('accounts.enable')) + '</button>') +
                     '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.id + '\')">' + t('accounts.delete') + '</button>' +
@@ -1800,6 +1808,11 @@
                 return '<span class="badge badge-trial">' + t('accounts.trial') + '</span>';
             }
             return '';
+        }
+
+        function getOverageBadge(account) {
+            if (!account.overageEnabled) return '';
+            return '<span class="badge" style="background:#16a34a;color:#fff">' + t('accounts.overageBadge') + '</span>';
         }
 
         function formatTrialExpiry(timestamp) {
@@ -2064,6 +2077,13 @@
             await fetch('/admin/api/accounts/' + id, {
                 method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
                 body: JSON.stringify({ enabled })
+            });
+            loadAccounts();
+        }
+        async function toggleOverage(id, overageEnabled) {
+            await fetch('/admin/api/accounts/' + id, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ overageEnabled })
             });
             loadAccounts();
         }
