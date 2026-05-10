@@ -282,7 +282,7 @@ func isOverageEnabled(breakdown UsageBreakdown) bool {
 	if breakdown.OverageEnabled || breakdown.IsOverageEnabled {
 		return true
 	}
-	if breakdown.OverageRate > 0 || breakdown.OverageCap > 0 || breakdown.Overages > 0 {
+	if breakdown.Overages > 0 {
 		return true
 	}
 

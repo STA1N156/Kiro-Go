@@ -13,15 +13,16 @@ func TestNormalizedUsageLimitKeepsPlanLimitWithoutOverage(t *testing.T) {
 	}
 }
 
-func TestNormalizedUsageLimitRaisesLimitWhenOverageRateExists(t *testing.T) {
+func TestNormalizedUsageLimitKeepsPlanLimitWhenOnlyOveragePricingExists(t *testing.T) {
 	breakdown := UsageBreakdown{
 		CurrentUsage: 1000,
 		UsageLimit:   1000,
 		OverageRate:  0.04,
+		OverageCap:   9000,
 	}
 
-	if got := normalizedUsageLimit(breakdown); got != overageEnabledUsageLimit {
-		t.Fatalf("expected overage-enabled limit %.0f, got %.0f", overageEnabledUsageLimit, got)
+	if got := normalizedUsageLimit(breakdown); got != 1000 {
+		t.Fatalf("expected overage-eligible account to stay at plan limit 1000, got %.0f", got)
 	}
 }
 
@@ -35,6 +36,18 @@ func TestNormalizedUsageLimitRaisesLimitWhenOverageFlagExists(t *testing.T) {
 
 	if got := normalizedUsageLimit(breakdown); got != overageEnabledUsageLimit {
 		t.Fatalf("expected overage-enabled flag to raise limit to %.0f, got %.0f", overageEnabledUsageLimit, got)
+	}
+}
+
+func TestNormalizedUsageLimitRaisesLimitWhenOverageStatusEnabled(t *testing.T) {
+	breakdown := UsageBreakdown{
+		CurrentUsage:  1000,
+		UsageLimit:    1000,
+		OverageStatus: "ENABLED",
+	}
+
+	if got := normalizedUsageLimit(breakdown); got != overageEnabledUsageLimit {
+		t.Fatalf("expected overage-enabled status to raise limit to %.0f, got %.0f", overageEnabledUsageLimit, got)
 	}
 }
 
