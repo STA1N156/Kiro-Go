@@ -11,6 +11,7 @@ import (
 )
 
 const kiroRestAPIBase = "https://codewhisperer.us-east-1.amazonaws.com"
+const overageEnabledUsageLimit = 10000.0
 
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
@@ -216,7 +217,7 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	if len(usage.UsageBreakdownList) > 0 {
 		breakdown := usage.UsageBreakdownList[0]
 		info.UsageCurrent = breakdown.CurrentUsage
-		info.UsageLimit = breakdown.UsageLimit
+		info.UsageLimit = normalizedUsageLimit(breakdown)
 		if info.UsageLimit > 0 {
 			info.UsagePercent = info.UsageCurrent / info.UsageLimit
 		}
@@ -270,6 +271,25 @@ func parseSubscriptionType(raw string) string {
 	return "FREE"
 }
 
+func normalizedUsageLimit(breakdown UsageBreakdown) float64 {
+	if isOverageEnabled(breakdown) && breakdown.UsageLimit < overageEnabledUsageLimit {
+		return overageEnabledUsageLimit
+	}
+	return breakdown.UsageLimit
+}
+
+func isOverageEnabled(breakdown UsageBreakdown) bool {
+	if breakdown.OverageEnabled || breakdown.IsOverageEnabled {
+		return true
+	}
+	if breakdown.OverageRate > 0 || breakdown.OverageCap > 0 || breakdown.Overages > 0 {
+		return true
+	}
+
+	status := strings.ToUpper(strings.TrimSpace(breakdown.OverageStatus))
+	return strings.Contains(status, "ENABLED") || strings.Contains(status, "ACTIVE")
+}
+
 // 响应结构体
 type UsageLimitsResponse struct {
 	UsageBreakdownList []UsageBreakdown  `json:"usageBreakdownList"`
@@ -279,14 +299,19 @@ type UsageLimitsResponse struct {
 }
 
 type UsageBreakdown struct {
-	ResourceType  string         `json:"resourceType"`
-	CurrentUsage  float64        `json:"currentUsage"`
-	UsageLimit    float64        `json:"usageLimit"`
-	Currency      string         `json:"currency"`
-	Unit          string         `json:"unit"`
-	OverageRate   float64        `json:"overageRate"`
-	FreeTrialInfo *FreeTrialInfo `json:"freeTrialInfo"`
-	Bonuses       []BonusInfo    `json:"bonuses"`
+	ResourceType      string         `json:"resourceType"`
+	CurrentUsage      float64        `json:"currentUsage"`
+	UsageLimit        float64        `json:"usageLimit"`
+	Currency          string         `json:"currency"`
+	Unit              string         `json:"unit"`
+	OverageRate       float64        `json:"overageRate"`
+	OverageCap        float64        `json:"overageCap"`
+	Overages          float64        `json:"overages"`
+	OverageEnabled    bool           `json:"overageEnabled"`
+	IsOverageEnabled  bool           `json:"isOverageEnabled"`
+	OverageStatus     string         `json:"overageStatus"`
+	FreeTrialInfo     *FreeTrialInfo `json:"freeTrialInfo"`
+	Bonuses           []BonusInfo    `json:"bonuses"`
 }
 
 type FreeTrialInfo struct {
