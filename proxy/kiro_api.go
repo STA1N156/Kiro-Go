@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"kiro-api-proxy/config"
+	"kiro-go/config"
 	"net/http"
 	"strings"
 	"time"
@@ -107,14 +107,15 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 }
 
 func setKiroHeaders(req *http.Request, account *config.Account) {
-	userAgent, amzUserAgent := BuildKiroUserAgent(account.MachineId)
+	host := ""
+	if req.URL != nil {
+		host = req.URL.Host
+	}
+	headerValues := buildRuntimeHeaderValues(account, host)
 
-	req.Header.Set("Authorization", "Bearer "+account.AccessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("x-amz-user-agent", amzUserAgent)
-	req.Header.Set("x-amzn-codewhisperer-optout", "true")
-	if account.AuthMethod == "api_key" {
+	applyKiroBaseHeaders(req, account, headerValues)
+	if account != nil && account.AuthMethod == "api_key" {
 		req.Header.Set("tokentype", "API_KEY")
 	}
 }

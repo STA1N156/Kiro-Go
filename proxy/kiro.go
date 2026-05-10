@@ -7,35 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"kiro-api-proxy/auth"
-	"kiro-api-proxy/config"
+	"kiro-go/auth"
+	"kiro-go/config"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-const (
-	KiroVersion   = "0.11.107"
-	AwsSdkVersion = "1.0.34"
-	NodeVersion   = "22.22.0"
-)
-
-// BuildKiroUserAgent 构造 Kiro 请求的 User-Agent / x-amz-user-agent
-func BuildKiroUserAgent(machineId string) (userAgent, amzUserAgent string) {
-	if machineId != "" {
-		userAgent = fmt.Sprintf("aws-sdk-js/%s ua/2.1 os/linux lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E KiroIDE-%s-%s",
-			AwsSdkVersion, NodeVersion, AwsSdkVersion, KiroVersion, machineId)
-		amzUserAgent = fmt.Sprintf("aws-sdk-js/%s KiroIDE %s %s", AwsSdkVersion, KiroVersion, machineId)
-		return
-	}
-	userAgent = fmt.Sprintf("aws-sdk-js/%s ua/2.1 os/linux lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E KiroIDE-%s",
-		AwsSdkVersion, NodeVersion, AwsSdkVersion, KiroVersion)
-	amzUserAgent = fmt.Sprintf("aws-sdk-js/%s KiroIDE %s", AwsSdkVersion, KiroVersion)
-	return
-}
 
 // 双端点配置（429 时自动 fallback）
 type kiroEndpoint struct {
@@ -187,9 +168,6 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	// 仍带着旧 ARN。
 	payload.ProfileArn = account.ProfileArn
 
-	// User-Agent
-	userAgent, amzUserAgent := BuildKiroUserAgent(account.MachineId)
-
 	// 根据配置排序端点
 	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
 
@@ -206,16 +184,20 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			continue
 		}
 
+		host := ""
+		if parsedURL, parseErr := url.Parse(ep.URL); parseErr == nil {
+			host = parsedURL.Host
+		}
+		headerValues := buildStreamingHeaderValues(account, host)
+
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "*/*")
 		req.Header.Set("X-Amz-Target", ep.AmzTarget)
-		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("X-Amz-User-Agent", amzUserAgent)
+		applyKiroBaseHeaders(req, account, headerValues)
 		req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 		req.Header.Set("x-amzn-codewhisperer-optout", "true")
 		req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 		req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
-		req.Header.Set("Authorization", "Bearer "+account.AccessToken)
 		if account.AuthMethod == "api_key" {
 			req.Header.Set("tokentype", "API_KEY")
 		}
@@ -257,16 +239,15 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 					// 在当前端点立即重试一次
 					reqBody2, _ := json.Marshal(payload)
 					req2, _ := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody2))
+					headerValues2 := buildStreamingHeaderValues(account, host)
 					req2.Header.Set("Content-Type", "application/json")
 					req2.Header.Set("Accept", "*/*")
 					req2.Header.Set("X-Amz-Target", ep.AmzTarget)
-					req2.Header.Set("User-Agent", userAgent)
-					req2.Header.Set("X-Amz-User-Agent", amzUserAgent)
+					applyKiroBaseHeaders(req2, account, headerValues2)
 					req2.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 					req2.Header.Set("x-amzn-codewhisperer-optout", "true")
 					req2.Header.Set("Amz-Sdk-Request", "attempt=2; max=3")
 					req2.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
-					req2.Header.Set("Authorization", "Bearer "+account.AccessToken)
 					if account.AuthMethod == "api_key" {
 						req2.Header.Set("tokentype", "API_KEY")
 					}
