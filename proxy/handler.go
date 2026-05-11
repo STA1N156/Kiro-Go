@@ -67,6 +67,9 @@ func validateClaudeRequestShape(req *ClaudeRequest) string {
 	if len(req.Messages) == 0 {
 		return "messages must not be empty"
 	}
+	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
+		return msg
+	}
 
 	hasUserContext := false
 	lastRole := ""
@@ -93,6 +96,75 @@ func validateClaudeRequestShape(req *ClaudeRequest) string {
 		return "at least one non-empty user message is required"
 	}
 	return ""
+}
+
+func validateClaudeThinkingConfig(thinking *ClaudeThinkingConfig, maxTokens int) string {
+	if thinking == nil {
+		return ""
+	}
+
+	kind := strings.ToLower(strings.TrimSpace(thinking.Type))
+	switch kind {
+	case "enabled":
+		if maxTokens == 0 {
+			return "thinking.type enabled cannot be used with max_tokens=0"
+		}
+		if thinking.BudgetTokens <= 0 {
+			return "thinking.budget_tokens is required when thinking.type is enabled"
+		}
+		if thinking.BudgetTokens < 1024 {
+			return "thinking.budget_tokens must be at least 1024"
+		}
+		if maxTokens > 0 && thinking.BudgetTokens >= maxTokens {
+			return "thinking.budget_tokens must be less than max_tokens"
+		}
+	case "adaptive":
+		if thinking.BudgetTokens != 0 {
+			return "thinking.budget_tokens is not supported when thinking.type is adaptive"
+		}
+	case "disabled":
+		if thinking.BudgetTokens != 0 {
+			return "thinking.budget_tokens is not supported when thinking.type is disabled"
+		}
+	default:
+		return "thinking.type must be one of: enabled, adaptive, disabled"
+	}
+
+	display := strings.ToLower(strings.TrimSpace(thinking.Display))
+	if display != "" && display != "summarized" && display != "omitted" {
+		return "thinking.display must be one of: summarized, omitted"
+	}
+	if kind == "disabled" && display != "" {
+		return "thinking.display is not supported when thinking.type is disabled"
+	}
+
+	return ""
+}
+
+type claudeThinkingResponseOptions struct {
+	Format      string
+	OmitDisplay bool
+}
+
+func resolveClaudeThinkingResponseOptions(thinking *ClaudeThinkingConfig, defaultFormat string) claudeThinkingResponseOptions {
+	opts := claudeThinkingResponseOptions{Format: defaultFormat}
+	if opts.Format == "" {
+		opts.Format = "thinking"
+	}
+	if thinking == nil {
+		return opts
+	}
+
+	display := strings.ToLower(strings.TrimSpace(thinking.Display))
+	switch display {
+	case "summarized":
+		opts.Format = "thinking"
+	case "omitted":
+		opts.Format = "thinking"
+		opts.OmitDisplay = true
+	}
+
+	return opts
 }
 
 func validateOpenAIRequestShape(req *OpenAIRequest) string {
@@ -583,8 +655,17 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
+		h.sendClaudeError(w, 400, "invalid_request_error", msg)
+		return
+	}
 
-	estimatedTokens := estimateClaudeRequestInputTokens(&req)
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	req.Model = actualModel
+	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
+
+	estimatedTokens := estimateClaudeRequestInputTokens(effectiveReq)
 	if estimatedTokens < 1 {
 		estimatedTokens = 1
 	}
@@ -639,23 +720,25 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	actualModel, thinkingPrompt := ResolveClaudeThinking(&req, thinkingCfg.Suffix)
 	req.Model = actualModel
 	thinking := thinkingPrompt != ""
-	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
-	cacheProfile := h.promptCache.BuildClaudeProfile(&req, estimatedInputTokens)
+	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
+	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
+	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
+	cacheProfile := h.promptCache.BuildClaudeProfile(effectiveReq, estimatedInputTokens)
 	cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
 	// 转换请求
 	kiroPayload := ClaudeToKiro(&req, thinkingPrompt)
 
-	// 流式或非流式
+	// Stream or non-stream
 	if req.Stream {
-		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheUsage, cacheProfile)
+		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheUsage, cacheProfile)
 	} else {
-		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheUsage, cacheProfile)
+		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheUsage, cacheProfile)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -667,11 +750,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	}
 
 	// 获取 thinking 输出格式配置
-	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
+	thinkingFormat := thinkingOpts.Format
 
 	msgID := "msg_" + uuid.New().String()
 	var inputTokens, outputTokens int
 	var credits float64
+	var realInputTokens int
 	var toolUses []KiroToolUse
 	var nextContentIndex int
 	var rawContentBuilder strings.Builder
@@ -783,6 +867,19 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 				"delta": map[string]string{"type": "text_delta", "text": text},
 			})
 		default:
+			if thinkingOpts.OmitDisplay {
+				if thinkingState == 1 {
+					startContentBlock("thinking")
+					return
+				}
+				if thinkingState == 3 {
+					if activeBlockType != "thinking" {
+						startContentBlock("thinking")
+					}
+					closeActiveBlock()
+				}
+				return
+			}
 			if thinkingState == 3 && text == "" {
 				if activeBlockType == "thinking" {
 					closeActiveBlock()
@@ -993,6 +1090,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 		OnCredits: func(c float64) {
 			credits = c
 		},
+		OnContextUsage: func(pct float64) {
+			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+		},
 	}
 
 	err := CallKiroAPI(account, payload, callback)
@@ -1014,7 +1114,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	}
 	closeActiveBlock()
 
-	if inputTokens <= 0 {
+	if realInputTokens > 0 {
+		inputTokens = realInputTokens
+	} else if inputTokens <= 0 {
 		inputTokens = estimatedInputTokens
 	}
 	outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
@@ -1112,12 +1214,13 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
 	var inputTokens, outputTokens int
 	var credits float64
+	var realInputTokens int
 
 	callback := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
@@ -1140,6 +1243,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		OnCredits: func(c float64) {
 			credits = c
 		},
+		OnContextUsage: func(pct float64) {
+			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+		},
 	}
 
 	err := CallKiroAPI(account, payload, callback)
@@ -1151,18 +1257,19 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	}
 
 	// 合并 thinking 内容（如果有 reasoningContentEvent 的内容）
-	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
+	thinkingFormat := thinkingOpts.Format
 	finalContent, extractedReasoning := extractThinkingFromContent(content)
+	rawThinkingContent := thinkingContent
 	// 合并流式 reasoning 与 <thinking> 标签内的内容；非 thinking 模式下丢弃。
 	if thinking && extractedReasoning != "" {
-		if thinkingContent == "" {
-			thinkingContent = extractedReasoning
+		if rawThinkingContent == "" {
+			rawThinkingContent = extractedReasoning
 		} else {
-			thinkingContent += extractedReasoning
+			rawThinkingContent += extractedReasoning
 		}
 	}
 	if !thinking {
-		thinkingContent = ""
+		rawThinkingContent = ""
 	}
 
 	// 兜底：模型偶尔会把工具调用以 "[Called X with args: {...}]" 的纯文本形式输出。
@@ -1172,29 +1279,37 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		toolUses = append(toolUses, bracketCalls...)
 	}
 
-	if inputTokens <= 0 {
+	if realInputTokens > 0 {
+		inputTokens = realInputTokens
+	} else if inputTokens <= 0 {
 		inputTokens = estimatedInputTokens
 	}
-	outputTokens = estimateClaudeOutputTokens(finalContent, thinkingContent, toolUses)
+	outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 	h.promptCache.Update(account.ID, cacheProfile)
 
-	if thinking && thinkingContent != "" {
+	responseThinkingContent := rawThinkingContent
+	includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
+	if includeEmptyThinkingBlock {
+		responseThinkingContent = ""
+	}
+
+	if thinking && responseThinkingContent != "" {
 		switch thinkingFormat {
 		case "think":
-			finalContent = "<think>" + thinkingContent + "</think>" + finalContent
-			thinkingContent = ""
+			finalContent = "<think>" + responseThinkingContent + "</think>" + finalContent
+			responseThinkingContent = ""
 		case "reasoning_content":
-			finalContent = thinkingContent + finalContent // Claude 格式不支持 reasoning_content，直接拼接
-			thinkingContent = ""
+			finalContent = responseThinkingContent + finalContent // Claude 格式不支持 reasoning_content，直接拼接
+			responseThinkingContent = ""
 		default:
 		}
 	}
 
-	resp := KiroToClaudeResponse(finalContent, thinkingContent, toolUses, inputTokens, outputTokens, model)
+	resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
 	resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 	resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
 	resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
@@ -1290,6 +1405,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	var toolCallIndex int
 	var inputTokens, outputTokens int
 	var credits float64
+	var realInputTokens int
 	var rawContentBuilder strings.Builder
 	var rawReasoningBuilder strings.Builder
 
@@ -1582,6 +1698,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		OnCredits: func(c float64) {
 			credits = c
 		},
+		OnContextUsage: func(pct float64) {
+			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+		},
 	}
 
 	err := CallKiroAPI(account, payload, callback)
@@ -1598,7 +1717,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		eventThinkingOpen = false
 	}
 
-	if inputTokens <= 0 {
+	if realInputTokens > 0 {
+		inputTokens = realInputTokens
+	} else if inputTokens <= 0 {
 		inputTokens = estimatedInputTokens
 	}
 	outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
@@ -1654,6 +1775,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	var toolUses []KiroToolUse
 	var inputTokens, outputTokens int
 	var credits float64
+	var realInputTokens int
 
 	callback := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
@@ -1667,6 +1789,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 		OnError:    func(err error) { h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429")) },
 		OnCredits:  func(c float64) { credits = c },
+		OnContextUsage: func(pct float64) {
+			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+		},
 	}
 
 	err := CallKiroAPI(account, payload, callback)
@@ -1691,7 +1816,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		toolUses = append(toolUses, bracketCalls...)
 	}
 
-	if inputTokens <= 0 {
+	if realInputTokens > 0 {
+		inputTokens = realInputTokens
+	} else if inputTokens <= 0 {
 		inputTokens = estimatedInputTokens
 	}
 	outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)

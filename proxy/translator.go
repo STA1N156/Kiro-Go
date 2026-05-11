@@ -62,6 +62,7 @@ const (
 type ClaudeThinkingConfig struct {
 	Type         string `json:"type"`
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	Display      string `json:"display,omitempty"`
 	Effort       string `json:"effort,omitempty"`
 }
 
@@ -180,6 +181,19 @@ func ResolveOpenAIThinking(req *OpenAIRequest, suffix string) (string, string) {
 	return mappedModel, ""
 }
 
+func resolveClaudeThinkingMode(model string, thinkingCfg *ClaudeThinkingConfig, thinkingSuffix string) (string, bool) {
+	actualModel, suffixThinking := ParseModelAndThinking(model, thinkingSuffix)
+	return actualModel, suffixThinking || isClaudeThinkingRequested(thinkingCfg)
+}
+
+func isClaudeThinkingRequested(thinkingCfg *ClaudeThinkingConfig) bool {
+	if thinkingCfg == nil {
+		return false
+	}
+	kind := strings.ToLower(strings.TrimSpace(thinkingCfg.Type))
+	return kind == "enabled" || kind == "adaptive"
+}
+
 func MapModel(model string) string {
 	mapped, _ := ParseModelAndThinking(model, "-thinking")
 	return mapped
@@ -206,9 +220,9 @@ type ClaudeRequest struct {
 	TopP        float64               `json:"top_p,omitempty"`
 	Stream      bool                  `json:"stream,omitempty"`
 	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
+	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"` // Anthropic extended thinking
 	Tools       []ClaudeTool          `json:"tools,omitempty"`
 	ToolChoice  interface{}           `json:"tool_choice,omitempty"`
-	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"` // Anthropic extended thinking
 }
 
 type ClaudeMessage struct {
@@ -220,6 +234,7 @@ type ClaudeContentBlock struct {
 	Type      string       `json:"type"`
 	Text      string       `json:"text,omitempty"`
 	Thinking  string       `json:"thinking,omitempty"`
+	Signature string       `json:"signature,omitempty"`
 	ID        string       `json:"id,omitempty"`
 	Name      string       `json:"name,omitempty"`
 	Input     interface{}  `json:"input,omitempty"`
@@ -381,6 +396,88 @@ func ClaudeToKiro(req *ClaudeRequest, thinkingPrompt string) *KiroPayload {
 	}
 
 	return payload
+}
+
+func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
+	systemPrompt := extractSystemPrompt(system)
+	if !thinking {
+		return systemPrompt
+	}
+	if systemPrompt == "" {
+		return ThinkingModePrompt
+	}
+	return ThinkingModePrompt + "\n\n" + systemPrompt
+}
+
+func cloneClaudeRequestForThinking(req *ClaudeRequest, thinking bool) *ClaudeRequest {
+	if req == nil {
+		return nil
+	}
+
+	cloned := *req
+	if thinking {
+		cloned.System = prependThinkingSystem(req.System)
+	}
+	return &cloned
+}
+
+func prependThinkingSystem(system interface{}) interface{} {
+	thinkingText := ThinkingModePrompt
+	if hasClaudeSystemContent(system) {
+		thinkingText += "\n"
+	}
+	thinkingBlock := map[string]interface{}{
+		"type": "text",
+		"text": thinkingText,
+	}
+
+	switch v := system.(type) {
+	case nil:
+		return []interface{}{thinkingBlock}
+	case string:
+		if v == "" {
+			return []interface{}{thinkingBlock}
+		}
+		return []interface{}{
+			thinkingBlock,
+			map[string]interface{}{
+				"type": "text",
+				"text": v,
+			},
+		}
+	case []interface{}:
+		blocks := make([]interface{}, 0, len(v)+1)
+		blocks = append(blocks, thinkingBlock)
+		blocks = append(blocks, v...)
+		return blocks
+	case []string:
+		blocks := make([]interface{}, 0, len(v)+1)
+		blocks = append(blocks, thinkingBlock)
+		for _, block := range v {
+			blocks = append(blocks, map[string]interface{}{
+				"type": "text",
+				"text": block,
+			})
+		}
+		return blocks
+	default:
+		return []interface{}{thinkingBlock}
+	}
+}
+
+func hasClaudeSystemContent(system interface{}) bool {
+	switch v := system.(type) {
+	case nil:
+		return false
+	case string:
+		return v != ""
+	case []interface{}:
+		return len(v) > 0
+	case []string:
+		return len(v) > 0
+	default:
+		return true
+	}
 }
 
 func extractSystemPrompt(system interface{}) string {
@@ -562,10 +659,10 @@ func convertClaudeTools(tools []ClaudeTool) []KiroToolWrapper {
 
 // ==================== Kiro -> Claude 转换 ====================
 
-func KiroToClaudeResponse(content, thinkingContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
+func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
 	blocks := make([]ClaudeContentBlock, 0)
 
-	if thinkingContent != "" {
+	if thinkingContent != "" || includeEmptyThinkingBlock {
 		blocks = append(blocks, ClaudeContentBlock{
 			Type:     "thinking",
 			Thinking: thinkingContent,

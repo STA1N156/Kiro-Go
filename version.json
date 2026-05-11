@@ -1,5 +1,5 @@
 {
   "version": "1.0.7",
-  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main：同步 KiroIDE/SDK 版本、proxy headers 统一、prompt cache tracker、模型聚合逻辑\n🧱 UA/签名头改由 proxy/kiro_headers.go 统一构建（streaming 与 runtime 分开），配置可热更新\n🗂 新增 proxy/cache_tracker.go：跟踪 5m/1h prompt cache breakpoint 与 token 使用\n🧩 统一模块名为 kiro-go（上游变更），随之修正 import 路径\n🧹 ClaudeToKiro / OpenAIToKiro 移除 UserInputMessage.ModelID 注入（跟随上游），避免部分模型路由异常\n🆕 保留本地：claude-3-7-sonnet-20250219 映射、<thinking> 标签真实边界识别、[Called ...] 工具调用兜底解析\n🆕 保留本地：请求体 thinking 字段与 reasoning_effort 识别、动态 max_thinking_length\n🆕 保留本地：Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型、工具名 sha256 缩短\n🆕 保留本地：401/403 单次刷新重试、invalid_grant 立即禁用账号、profile_arn 动态注入",
+  "changelog": "Merged latest Quorinex/Kiro-Go updates: Claude thinking routing, contextUsageEvent token accounting, and improved prompt cache tracking. Kept local Kiro-Go custom behavior.",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }
