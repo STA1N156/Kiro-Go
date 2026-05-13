@@ -977,6 +977,7 @@
                                 <th style="padding:8px 6px" data-i18n="logs.time"></th>
                                 <th style="padding:8px 6px" data-i18n="logs.model"></th>
                                 <th style="padding:8px 6px" data-i18n="logs.account"></th>
+                                <th style="padding:8px 6px" data-i18n="logs.keyName"></th>
                                 <th style="padding:8px 6px" data-i18n="logs.type"></th>
                                 <th style="padding:8px 6px" data-i18n="logs.tokens"></th>
                                 <th style="padding:8px 6px" data-i18n="logs.duration"></th>
@@ -986,22 +987,27 @@
                         <tbody id="logsBody"></tbody>
                     </table>
                 </div>
+                <div id="logsPagination" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 0"></div>
                 <p id="logsEmpty" class="hidden" style="text-align:center;color:#64748b;padding:20px" data-i18n="logs.empty"></p>
             </div>
         </div>
         <div id="tabSettings" class="tab-content hidden">
             <div class="card">
-                <div class="card-header"><span class="card-title" data-i18n="settings.apiSettings"></span></div>
-                <div class="form-group">
-                    <label style="display:flex;align-items:center;gap:10px">
-                        <label class="switch"><input type="checkbox" id="requireApiKey"><span
-                                class="slider"></span></label>
-                        <span data-i18n="settings.enableApiKey"></span>
-                    </label>
+                <div class="card-header">
+                    <span class="card-title" data-i18n="settings.apiSettings"></span>
+                    <div class="card-actions">
+                        <label style="display:flex;align-items:center;gap:8px;font-size:13px">
+                            <label class="switch"><input type="checkbox" id="requireApiKey" onchange="toggleRequireApiKey()"><span class="slider"></span></label>
+                            <span data-i18n="settings.enableApiKey"></span>
+                        </label>
+                    </div>
                 </div>
-                <div class="form-group"><label>API Key</label><div style="display:flex;gap:8px;align-items:stretch"><input type="text" id="apiKeyInput" style="flex:1"
-                        data-i18n-placeholder="settings.apiKeyPlaceholder"><button class="btn btn-sm btn-secondary" onclick="generateApiKey()" data-i18n="settings.generateApiKey"></button></div></div>
-                <button class="btn btn-primary" onclick="saveSettings()" data-i18n="common.save"></button>
+                <div style="display:flex;gap:8px;margin-bottom:12px;align-items:stretch">
+                    <input type="text" id="newKeyName" style="flex:1" data-i18n-placeholder="settings.keyNamePlaceholder">
+                    <button class="btn btn-primary btn-sm" onclick="createApiKey()" data-i18n="settings.createKey"></button>
+                </div>
+                <div id="apiKeysList"></div>
+                <p id="apiKeysEmpty" class="hidden" style="text-align:center;color:#64748b;padding:12px;font-size:13px" data-i18n="settings.noKeys"></p>
             </div>
             <div class="card">
                 <div class="card-header"><span class="card-title" data-i18n="settings.thinkingSettings"></span></div>
@@ -1133,9 +1139,13 @@
                 'logs.empty': '暂无日志记录',
                 'logs.success': '成功',
                 'logs.failed': '失败',
+                'logs.keyName': '密钥',
                 'logs.clear': '清除日志',
                 'logs.confirmClear': '确定清除所有日志？',
                 'logs.retention': '保留天数',
+                'logs.prev': '上一页',
+                'logs.next': '下一页',
+                'logs.pageInfo': '第 {0} 页 / 共 {1} 页',
                 'accounts.title': '账号列表',
                 'accounts.add': '添加账号',
                 'accounts.empty': '暂无账号',
@@ -1169,10 +1179,16 @@
                 'time.minutes': '分钟',
                 'time.hours': '小时',
                 'time.days': '天',
-                'settings.apiSettings': 'API 设置',
+                'settings.apiSettings': 'API 密钥管理',
                 'settings.enableApiKey': '启用 API Key 验证',
                 'settings.apiKeyPlaceholder': '留空则不验证',
                 'settings.generateApiKey': '随机生成',
+                'settings.createKey': '创建密钥',
+                'settings.keyName': '密钥名称',
+                'settings.keyNamePlaceholder': '输入密钥名称',
+                'settings.keyCreated': '密钥已创建，请立即复制保存',
+                'settings.confirmDeleteKey': '确定删除此密钥？',
+                'settings.noKeys': '暂无密钥',
                 'settings.thinkingSettings': 'Thinking 模式设置',
                 'settings.thinkingSuffix': '触发后缀',
                 'settings.thinkingSuffixHint': '模型名称加此后缀即启用思考模式，如 claude-sonnet-4.5-thinking',
@@ -1361,9 +1377,13 @@
                 'logs.empty': 'No logs yet',
                 'logs.success': 'Success',
                 'logs.failed': 'Failed',
+                'logs.keyName': 'Key',
                 'logs.clear': 'Clear Logs',
                 'logs.confirmClear': 'Clear all logs?',
                 'logs.retention': 'Retention',
+                'logs.prev': 'Prev',
+                'logs.next': 'Next',
+                'logs.pageInfo': 'Page {0} of {1}',
                 'accounts.title': 'Account List',
                 'accounts.add': 'Add Account',
                 'accounts.empty': 'No accounts',
@@ -1391,10 +1411,16 @@
                 'time.minutes': 'min',
                 'time.hours': 'hr',
                 'time.days': 'd',
-                'settings.apiSettings': 'API Settings',
+                'settings.apiSettings': 'API Key Management',
                 'settings.enableApiKey': 'Enable API Key Verification',
                 'settings.apiKeyPlaceholder': 'Leave empty to disable',
                 'settings.generateApiKey': 'Generate',
+                'settings.createKey': 'Create Key',
+                'settings.keyName': 'Key Name',
+                'settings.keyNamePlaceholder': 'Enter key name',
+                'settings.keyCreated': 'Key created. Copy and save it now.',
+                'settings.confirmDeleteKey': 'Delete this key?',
+                'settings.noKeys': 'No keys yet',
                 'settings.thinkingSettings': 'Thinking Mode Settings',
                 'settings.thinkingSuffix': 'Trigger Suffix',
                 'settings.thinkingSuffixHint': 'Add this suffix to model name to enable thinking mode, e.g. claude-sonnet-4.5-thinking',
@@ -1720,18 +1746,25 @@
             document.getElementById('statTokens').textContent = formatNum(d.totalTokens || 0);
             document.getElementById('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
         }
-        async function loadLogs() {
+        let logsCurrentPage = 1;
+        const logsPageSize = 50;
+        let logsTotalPages = 1;
+        async function loadLogs(page) {
+            if (page !== undefined) logsCurrentPage = page;
             try {
-                const res = await fetch('/admin/api/logs?limit=200', { headers: { 'X-Admin-Password': password } });
+                const res = await fetch(`/admin/api/logs?limit=${logsPageSize}&page=${logsCurrentPage}`, { headers: { 'X-Admin-Password': password } });
                 const d = await res.json();
                 const tbody = document.getElementById('logsBody');
                 const empty = document.getElementById('logsEmpty');
+                const pagination = document.getElementById('logsPagination');
                 if (d.retentionDays) {
                     document.getElementById('logRetentionSelect').value = d.retentionDays;
                 }
+                logsTotalPages = d.totalPages || 1;
                 if (!d.logs || d.logs.length === 0) {
                     tbody.innerHTML = '';
                     empty.classList.remove('hidden');
+                    pagination.innerHTML = '';
                     return;
                 }
                 empty.classList.add('hidden');
@@ -1744,17 +1777,38 @@
                     const tokens = log.success ? `${formatNum(log.inputTokens)}/${formatNum(log.outputTokens)}` : '-';
                     const duration = log.duration > 0 ? (log.duration >= 1000 ? (log.duration / 1000).toFixed(1) + 's' : log.duration + 'ms') : '-';
                     const account = log.account ? maskEmail(log.account) : '-';
+                    const keyName = log.keyName || '-';
                     return `<tr style="border-bottom:1px solid #f1f5f9">
                         <td style="padding:8px 6px;white-space:nowrap">${timeStr}</td>
                         <td style="padding:8px 6px;font-family:monospace;font-size:12px">${log.model || '-'}</td>
                         <td style="padding:8px 6px">${account}</td>
+                        <td style="padding:8px 6px;font-size:12px">${keyName}</td>
                         <td style="padding:8px 6px"><span class="badge badge-info">${log.apiType || '-'}${log.stream ? ' stream' : ''}</span></td>
                         <td style="padding:8px 6px">${tokens}</td>
                         <td style="padding:8px 6px">${duration}</td>
                         <td style="padding:8px 6px">${statusBadge}</td>
                     </tr>`;
                 }).join('');
+                renderLogsPagination();
             } catch (e) { }
+        }
+        function renderLogsPagination() {
+            const container = document.getElementById('logsPagination');
+            if (logsTotalPages <= 1) { container.innerHTML = ''; return; }
+            let html = '';
+            const btnStyle = 'padding:4px 10px;border:1px solid #e2e8f0;border-radius:4px;background:#fff;cursor:pointer;font-size:13px';
+            const activeBtnStyle = 'padding:4px 10px;border:1px solid #3b82f6;border-radius:4px;background:#3b82f6;color:#fff;font-size:13px';
+            const disabledBtnStyle = 'padding:4px 10px;border:1px solid #e2e8f0;border-radius:4px;background:#f8fafc;color:#94a3b8;font-size:13px;cursor:default';
+            html += `<button style="${logsCurrentPage <= 1 ? disabledBtnStyle : btnStyle}" onclick="loadLogs(${logsCurrentPage - 1})" ${logsCurrentPage <= 1 ? 'disabled' : ''}>${t('logs.prev')}</button>`;
+            let start = Math.max(1, logsCurrentPage - 2);
+            let end = Math.min(logsTotalPages, start + 4);
+            start = Math.max(1, end - 4);
+            for (let i = start; i <= end; i++) {
+                html += `<button style="${i === logsCurrentPage ? activeBtnStyle : btnStyle}" onclick="loadLogs(${i})">${i}</button>`;
+            }
+            html += `<button style="${logsCurrentPage >= logsTotalPages ? disabledBtnStyle : btnStyle}" onclick="loadLogs(${logsCurrentPage + 1})" ${logsCurrentPage >= logsTotalPages ? 'disabled' : ''}>${t('logs.next')}</button>`;
+            html += `<span style="font-size:12px;color:#64748b;margin-left:8px">${t('logs.pageInfo').replace('{0}', logsCurrentPage).replace('{1}', logsTotalPages)}</span>`;
+            container.innerHTML = html;
         }
         async function clearLogs() {
             if (!confirm(t('logs.confirmClear'))) return;
@@ -2099,12 +2153,66 @@
             } catch (e) { /* silent */ }
         }
         async function loadSettings() {
-            const res = await fetch('/admin/api/settings', { headers: { 'X-Admin-Password': password } });
-            const d = await res.json();
-            document.getElementById('requireApiKey').checked = d.requireApiKey;
-            document.getElementById('apiKeyInput').value = d.apiKey || '';
+            loadApiKeys();
             loadThinkingConfig();
             loadEndpointConfig();
+        }
+        async function loadApiKeys() {
+            const res = await fetch('/admin/api/apikeys', { headers: { 'X-Admin-Password': password } });
+            const d = await res.json();
+            document.getElementById('requireApiKey').checked = d.requireApiKey;
+            const list = document.getElementById('apiKeysList');
+            const empty = document.getElementById('apiKeysEmpty');
+            if (!d.keys || d.keys.length === 0) {
+                list.innerHTML = '';
+                empty.classList.remove('hidden');
+                return;
+            }
+            empty.classList.add('hidden');
+            list.innerHTML = d.keys.map(k => {
+                const date = new Date(k.createdAt * 1000).toLocaleDateString('zh-CN');
+                return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #f1f5f9">
+                    <span style="font-weight:500;min-width:80px">${k.name}</span>
+                    <code style="flex:1;font-size:12px;color:#64748b;background:#f8fafc;padding:4px 8px;border-radius:4px">${k.keyPreview}</code>
+                    <span style="font-size:12px;color:#94a3b8">${date}</span>
+                    <label class="switch" style="transform:scale(0.8)"><input type="checkbox" ${k.enabled ? 'checked' : ''} onchange="toggleApiKey('${k.id}', this.checked, '${k.name}')"><span class="slider"></span></label>
+                    <button class="btn btn-danger btn-sm" style="padding:2px 8px;font-size:12px" onclick="deleteApiKey('${k.id}')">&times;</button>
+                </div>`;
+            }).join('');
+        }
+        async function createApiKey() {
+            const nameInput = document.getElementById('newKeyName');
+            const name = nameInput.value.trim() || 'Unnamed';
+            const res = await fetch('/admin/api/apikeys', {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ name })
+            });
+            const d = await res.json();
+            if (d.key) {
+                nameInput.value = '';
+                prompt(t('settings.keyCreated'), d.key);
+                loadApiKeys();
+            }
+        }
+        async function toggleApiKey(id, enabled, name) {
+            await fetch('/admin/api/apikeys/' + id, {
+                method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ name, enabled })
+            });
+        }
+        async function deleteApiKey(id) {
+            if (!confirm(t('settings.confirmDeleteKey'))) return;
+            await fetch('/admin/api/apikeys/' + id, {
+                method: 'DELETE', headers: { 'X-Admin-Password': password }
+            });
+            loadApiKeys();
+        }
+        async function toggleRequireApiKey() {
+            const requireApiKey = document.getElementById('requireApiKey').checked;
+            await fetch('/admin/api/settings', {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ requireApiKey })
+            });
         }
         async function loadThinkingConfig() {
             const res = await fetch('/admin/api/thinking', { headers: { 'X-Admin-Password': password } });
@@ -2133,24 +2241,6 @@
             });
             const d = await res.json();
             if (d.success) { alert(t('settings.endpointSaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
-        }
-        function generateApiKey() {
-            const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-            let key = 'sk-';
-            for (let i = 0; i < 32; i++) key += chars.charAt(Math.floor(Math.random() * chars.length));
-            document.getElementById('apiKeyInput').value = key;
-        }
-        async function saveSettings() {
-            const requireApiKey = document.getElementById('requireApiKey').checked;
-            const apiKeyInput = document.getElementById('apiKeyInput');
-            if (requireApiKey && !apiKeyInput.value.trim()) {
-                generateApiKey();
-            }
-            await fetch('/admin/api/settings', {
-                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify({ requireApiKey, apiKey: apiKeyInput.value })
-            });
-            alert(t('detail.saved'));
         }
         async function changePassword() {
             const newPwd = document.getElementById('newPassword').value;

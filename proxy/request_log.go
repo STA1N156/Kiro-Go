@@ -23,6 +23,7 @@ type RequestLog struct {
 	Duration     int64   `json:"duration"`
 	Success      bool    `json:"success"`
 	Error        string  `json:"error,omitempty"`
+	KeyName      string  `json:"keyName,omitempty"`
 }
 
 // RequestLogStore 持久化日志存储
@@ -68,6 +69,43 @@ func (s *RequestLogStore) Recent(n int) []RequestLog {
 		result[i] = s.entries[total-1-i]
 	}
 	return result
+}
+
+// Page 返回分页结果（按时间倒序）和总数
+func (s *RequestLogStore) Page(page, pageSize int) ([]RequestLog, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	total := len(s.entries)
+	if total == 0 {
+		return nil, 0
+	}
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 500 {
+		pageSize = 500
+	}
+	if page <= 0 {
+		page = 1
+	}
+
+	offset := (page - 1) * pageSize
+	if offset >= total {
+		return nil, total
+	}
+
+	end := total - offset
+	start := end - pageSize
+	if start < 0 {
+		start = 0
+	}
+
+	result := make([]RequestLog, end-start)
+	for i := 0; i < end-start; i++ {
+		result[i] = s.entries[end-1-i]
+	}
+	return result, total
 }
 
 func (s *RequestLogStore) Count() int {

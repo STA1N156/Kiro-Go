@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -222,18 +223,16 @@ func (h *Handler) refreshAllAccounts() {
 	h.pool.Reload()
 }
 
-// validateApiKey 验证 API Key
-func (h *Handler) validateApiKey(r *http.Request) bool {
+type contextKey string
+
+const ctxKeyName contextKey = "apiKeyName"
+
+// validateApiKey 验证 API Key，返回 (是否通过, 匹配的 key 名称)
+func (h *Handler) validateApiKey(r *http.Request) (bool, string) {
 	if !config.IsApiKeyRequired() {
-		return true
+		return true, ""
 	}
 
-	expectedKey := config.GetApiKey()
-	if expectedKey == "" {
-		return true
-	}
-
-	// 从 Authorization 头或 X-Api-Key 头获取
 	authHeader := r.Header.Get("Authorization")
 	apiKeyHeader := r.Header.Get("X-Api-Key")
 
@@ -244,7 +243,11 @@ func (h *Handler) validateApiKey(r *http.Request) bool {
 		providedKey = apiKeyHeader
 	}
 
-	return providedKey == expectedKey
+	if providedKey == "" {
+		return false, ""
+	}
+
+	return config.ValidateApiKey(providedKey)
 }
 
 // ServeHTTP 路由分发
@@ -266,27 +269,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	// API 端点（需要验证 API Key）
 	case path == "/v1/messages" || path == "/messages" || path == "/anthropic/v1/messages":
-		if !h.validateApiKey(r) {
+		valid, keyName := h.validateApiKey(r)
+		if !valid {
 			h.sendClaudeError(w, 401, "authentication_error", "Invalid or missing API key")
 			return
 		}
-		h.handleClaudeMessages(w, r)
+		ctx := context.WithValue(r.Context(), ctxKeyName, keyName)
+		h.handleClaudeMessages(w, r.WithContext(ctx))
 	case path == "/v1/messages/count_tokens" || path == "/messages/count_tokens":
-		if !h.validateApiKey(r) {
+		valid, _ := h.validateApiKey(r)
+		if !valid {
 			h.sendClaudeError(w, 401, "authentication_error", "Invalid or missing API key")
 			return
 		}
 		h.handleCountTokens(w, r)
 	case path == "/v1/chat/completions" || path == "/chat/completions":
-		if !h.validateApiKey(r) {
+		valid, keyName := h.validateApiKey(r)
+		if !valid {
 			h.sendOpenAIError(w, 401, "authentication_error", "Invalid or missing API key")
 			return
 		}
-		h.handleOpenAIChat(w, r)
+		ctx := context.WithValue(r.Context(), ctxKeyName, keyName)
+		h.handleOpenAIChat(w, r.WithContext(ctx))
 	case path == "/v1/models" || path == "/models":
 		h.handleModels(w, r)
 	case path == "/api/event_logging/batch":
-		// Claude Code 遥测端点 - 直接返回 200 OK
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Write([]byte(`{"status":"ok"}`))
 
@@ -304,7 +311,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 统计端点（需要 API Key 鉴权）
 	case path == "/v1/stats":
-		if !h.validateApiKey(r) {
+		valid, _ := h.validateApiKey(r)
+		if !valid {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(401)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing API key"})
@@ -651,15 +659,16 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	kiroPayload := ClaudeToKiro(&req, thinkingPrompt)
 
 	// 流式或非流式
+	keyName, _ := r.Context().Value(ctxKeyName).(string)
 	if req.Stream {
-		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheUsage, cacheProfile)
+		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheUsage, cacheProfile, keyName)
 	} else {
-		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheUsage, cacheProfile)
+		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheUsage, cacheProfile, keyName)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile, keyName string) {
 	startMs := nowMs()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1007,7 +1016,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 		h.requestLogs.Add(RequestLog{
 			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 			Account: account.Email, APIType: "claude", Stream: true,
-			Duration: nowMs() - startMs, Success: false, Error: err.Error(),
+			Duration: nowMs() - startMs, Success: false, Error: err.Error(), KeyName: keyName,
 		})
 		h.sendSSE(w, flusher, "error", map[string]interface{}{
 			"type":  "error",
@@ -1044,7 +1053,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 		ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 		Account: account.Email, APIType: "claude", Stream: true,
 		InputTokens: inputTokens, OutputTokens: outputTokens, Credits: credits,
-		Duration: nowMs() - startMs, Success: true,
+		Duration: nowMs() - startMs, Success: true, KeyName: keyName,
 	})
 	h.promptCache.Update(account.ID, cacheProfile)
 
@@ -1128,7 +1137,7 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile, keyName string) {
 	startMs := nowMs()
 	var content string
 	var thinkingContent string
@@ -1166,7 +1175,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		h.requestLogs.Add(RequestLog{
 			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 			Account: account.Email, APIType: "claude", Stream: false,
-			Duration: nowMs() - startMs, Success: false, Error: err.Error(),
+			Duration: nowMs() - startMs, Success: false, Error: err.Error(), KeyName: keyName,
 		})
 		h.sendClaudeError(w, 500, "api_error", err.Error())
 		return
@@ -1207,7 +1216,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 		Account: account.Email, APIType: "claude", Stream: false,
 		InputTokens: inputTokens, OutputTokens: outputTokens, Credits: credits,
-		Duration: nowMs() - startMs, Success: true,
+		Duration: nowMs() - startMs, Success: true, KeyName: keyName,
 	})
 
 	if thinking && thinkingContent != "" {
@@ -1291,15 +1300,16 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 	kiroPayload := OpenAIToKiro(&req, thinkingPrompt)
 
+	keyName, _ := r.Context().Value(ctxKeyName).(string)
 	if req.Stream {
-		h.handleOpenAIStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleOpenAIStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, keyName)
 	} else {
-		h.handleOpenAINonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleOpenAINonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, keyName)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, keyName string) {
 	startMs := nowMs()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1620,7 +1630,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		h.requestLogs.Add(RequestLog{
 			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 			Account: account.Email, APIType: "openai", Stream: true,
-			Duration: nowMs() - startMs, Success: false, Error: err.Error(),
+			Duration: nowMs() - startMs, Success: false, Error: err.Error(), KeyName: keyName,
 		})
 		return
 	}
@@ -1656,7 +1666,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 		Account: account.Email, APIType: "openai", Stream: true,
 		InputTokens: inputTokens, OutputTokens: outputTokens, Credits: credits,
-		Duration: nowMs() - startMs, Success: true,
+		Duration: nowMs() - startMs, Success: true, KeyName: keyName,
 	})
 
 	// 发送结束
@@ -1688,7 +1698,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, keyName string) {
 	startMs := nowMs()
 	var content string
 	var reasoningContent string
@@ -1717,7 +1727,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		h.requestLogs.Add(RequestLog{
 			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 			Account: account.Email, APIType: "openai", Stream: false,
-			Duration: nowMs() - startMs, Success: false, Error: err.Error(),
+			Duration: nowMs() - startMs, Success: false, Error: err.Error(), KeyName: keyName,
 		})
 		h.sendOpenAIError(w, 500, "server_error", err.Error())
 		return
@@ -1749,7 +1759,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 		Account: account.Email, APIType: "openai", Stream: false,
 		InputTokens: inputTokens, OutputTokens: outputTokens, Credits: credits,
-		Duration: nowMs() - startMs, Success: true,
+		Duration: nowMs() - startMs, Success: true, KeyName: keyName,
 	})
 
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
@@ -1882,6 +1892,14 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetLogRetention(w, r)
 	case path == "/logs/retention" && r.Method == "POST":
 		h.apiUpdateLogRetention(w, r)
+	case path == "/apikeys" && r.Method == "GET":
+		h.apiGetApiKeys(w, r)
+	case path == "/apikeys" && r.Method == "POST":
+		h.apiCreateApiKey(w, r)
+	case strings.HasPrefix(path, "/apikeys/") && r.Method == "PUT":
+		h.apiUpdateApiKey(w, r, strings.TrimPrefix(path, "/apikeys/"))
+	case strings.HasPrefix(path, "/apikeys/") && r.Method == "DELETE":
+		h.apiDeleteApiKey(w, r, strings.TrimPrefix(path, "/apikeys/"))
 	default:
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})
@@ -2527,7 +2545,7 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ApiKey        string `json:"apiKey"`
-		RequireApiKey bool   `json:"requireApiKey"`
+		RequireApiKey *bool  `json:"requireApiKey"`
 		Password      string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2536,10 +2554,10 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := config.UpdateSettings(req.ApiKey, req.RequireApiKey, req.Password); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
+	if req.Password != "" {
+		config.UpdateSettings(req.ApiKey, config.IsApiKeyRequired(), req.Password)
+	} else if req.RequireApiKey != nil {
+		config.UpdateRequireApiKey(*req.RequireApiKey)
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -3045,21 +3063,38 @@ func (h *Handler) handleRefreshErr(account *config.Account, err error) error {
 }
 
 func (h *Handler) apiGetLogs(w http.ResponseWriter, r *http.Request) {
-	n := 50
+	pageSize := 50
 	if q := r.URL.Query().Get("limit"); q != "" {
 		if v, err := strconv.Atoi(q); err == nil && v > 0 {
-			n = v
+			pageSize = v
 		}
 	}
-	if n > 500 {
-		n = 500
+	if pageSize > 500 {
+		pageSize = 500
 	}
-	logs := h.requestLogs.Recent(n)
+
+	page := 1
+	if q := r.URL.Query().Get("page"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 {
+			page = v
+		}
+	}
+
+	logs, total := h.requestLogs.Page(page, pageSize)
 	if logs == nil {
 		logs = []RequestLog{}
 	}
+
+	totalPages := (total + pageSize - 1) / pageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total":         h.requestLogs.Count(),
+		"total":         total,
+		"page":          page,
+		"pageSize":      pageSize,
+		"totalPages":    totalPages,
 		"retentionDays": config.GetLogRetentionDays(),
 		"logs":          logs,
 	})
@@ -3096,4 +3131,111 @@ func (h *Handler) apiUpdateLogRetention(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "retentionDays": req.Days})
+}
+
+func (h *Handler) apiGetApiKeys(w http.ResponseWriter, r *http.Request) {
+	keys := config.GetApiKeys()
+	result := make([]map[string]interface{}, len(keys))
+	for i, k := range keys {
+		keyPreview := k.Key
+		if len(k.Key) > 10 {
+			keyPreview = k.Key[:6] + "****" + k.Key[len(k.Key)-4:]
+		}
+		result[i] = map[string]interface{}{
+			"id":         k.ID,
+			"name":       k.Name,
+			"keyPreview": keyPreview,
+			"createdAt":  k.CreatedAt,
+			"enabled":    k.Enabled,
+		}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"keys":          result,
+		"requireApiKey": config.IsApiKeyRequired(),
+	})
+}
+
+func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.Name == "" {
+		req.Name = "Unnamed"
+	}
+
+	entry := config.ApiKeyEntry{
+		ID:        config.GenerateMachineId(),
+		Name:      req.Name,
+		Key:       config.GenerateApiKeySecret(),
+		CreatedAt: time.Now().Unix(),
+		Enabled:   true,
+	}
+	if err := config.AddApiKey(entry); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":        entry.ID,
+		"name":      entry.Name,
+		"key":       entry.Key,
+		"createdAt": entry.CreatedAt,
+		"enabled":   entry.Enabled,
+	})
+}
+
+func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Name    string `json:"name"`
+		Enabled *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	keys := config.GetApiKeys()
+	var found *config.ApiKeyEntry
+	for _, k := range keys {
+		if k.ID == id {
+			found = &k
+			break
+		}
+	}
+	if found == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Key not found"})
+		return
+	}
+
+	name := found.Name
+	enabled := found.Enabled
+	if req.Name != "" {
+		name = req.Name
+	}
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+
+	if err := config.UpdateApiKey(id, name, enabled); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
+func (h *Handler) apiDeleteApiKey(w http.ResponseWriter, r *http.Request, id string) {
+	if err := config.DeleteApiKey(id); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }

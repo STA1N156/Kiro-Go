@@ -89,18 +89,28 @@ type Account struct {
 	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
 }
 
+// ApiKeyEntry 单个 API 密钥
+type ApiKeyEntry struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Key       string `json:"key"`
+	CreatedAt int64  `json:"createdAt"`
+	Enabled   bool   `json:"enabled"`
+}
+
 // Config represents the global application configuration.
 type Config struct {
 	// Server settings
-	Password      string    `json:"password"`         // Admin panel password
-	Port          int       `json:"port"`             // HTTP server port (default: 8080)
-	Host          string    `json:"host"`             // HTTP server bind address (default: 0.0.0.0)
-	ApiKey        string    `json:"apiKey,omitempty"` // API key for client authentication
-	RequireApiKey bool      `json:"requireApiKey"`    // Whether to enforce API key validation
-	KiroVersion   string    `json:"kiroVersion,omitempty"`
-	SystemVersion string    `json:"systemVersion,omitempty"`
-	NodeVersion   string    `json:"nodeVersion,omitempty"`
-	Accounts      []Account `json:"accounts"` // Registered Kiro accounts
+	Password      string        `json:"password"`           // Admin panel password
+	Port          int           `json:"port"`               // HTTP server port (default: 8080)
+	Host          string        `json:"host"`               // HTTP server bind address (default: 0.0.0.0)
+	ApiKey        string        `json:"apiKey,omitempty"`   // DEPRECATED: legacy single key
+	ApiKeys       []ApiKeyEntry `json:"apiKeys,omitempty"`  // Multi API key list
+	RequireApiKey bool          `json:"requireApiKey"`      // Whether to enforce API key validation
+	KiroVersion   string        `json:"kiroVersion,omitempty"`
+	SystemVersion string        `json:"systemVersion,omitempty"`
+	NodeVersion   string        `json:"nodeVersion,omitempty"`
+	Accounts      []Account     `json:"accounts"` // Registered Kiro accounts
 
 	// Thinking mode configuration for extended reasoning output
 	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
@@ -183,6 +193,7 @@ func Load() error {
 		return err
 	}
 	cfg = &c
+	migrateApiKey()
 	return nil
 }
 
@@ -323,6 +334,13 @@ func IsApiKeyRequired() bool {
 	return cfg.RequireApiKey
 }
 
+func UpdateRequireApiKey(requireApiKey bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.RequireApiKey = requireApiKey
+	return Save()
+}
+
 func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -332,6 +350,100 @@ func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
 		cfg.Password = password
 	}
 	return Save()
+}
+
+// migrateApiKey 将旧的单 ApiKey 迁移到 ApiKeys 列表
+func migrateApiKey() {
+	if cfg.ApiKey != "" && len(cfg.ApiKeys) == 0 {
+		cfg.ApiKeys = []ApiKeyEntry{{
+			ID:        GenerateMachineId(),
+			Name:      "Default",
+			Key:       cfg.ApiKey,
+			CreatedAt: time.Now().Unix(),
+			Enabled:   true,
+		}}
+		cfg.ApiKey = ""
+		Save()
+	}
+}
+
+func GetApiKeys() []ApiKeyEntry {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	keys := make([]ApiKeyEntry, len(cfg.ApiKeys))
+	copy(keys, cfg.ApiKeys)
+	return keys
+}
+
+func AddApiKey(entry ApiKeyEntry) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ApiKeys = append(cfg.ApiKeys, entry)
+	return Save()
+}
+
+func UpdateApiKey(id string, name string, enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, k := range cfg.ApiKeys {
+		if k.ID == id {
+			cfg.ApiKeys[i].Name = name
+			cfg.ApiKeys[i].Enabled = enabled
+			return Save()
+		}
+	}
+	return nil
+}
+
+func DeleteApiKey(id string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, k := range cfg.ApiKeys {
+		if k.ID == id {
+			cfg.ApiKeys = append(cfg.ApiKeys[:i], cfg.ApiKeys[i+1:]...)
+			return Save()
+		}
+	}
+	return nil
+}
+
+// ValidateApiKey 验证密钥并返回匹配的 key name
+func ValidateApiKey(providedKey string) (bool, string) {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+
+	if !cfg.RequireApiKey {
+		return true, ""
+	}
+
+	if len(cfg.ApiKeys) > 0 {
+		for _, k := range cfg.ApiKeys {
+			if k.Enabled && k.Key == providedKey {
+				return true, k.Name
+			}
+		}
+		return false, ""
+	}
+
+	// 兼容旧单 key
+	if cfg.ApiKey == "" {
+		return true, ""
+	}
+	if providedKey == cfg.ApiKey {
+		return true, "default"
+	}
+	return false, ""
+}
+
+// GenerateApiKeySecret 生成 sk- 前缀的随机密钥
+func GenerateApiKeySecret() string {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 32)
+	rand.Read(b)
+	for i := range b {
+		b[i] = chars[int(b[i])%len(chars)]
+	}
+	return "sk-" + string(b)
 }
 
 func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits float64) error {
