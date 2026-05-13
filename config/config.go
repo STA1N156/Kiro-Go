@@ -108,8 +108,17 @@ type Config struct {
 	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
 	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
 
-	// Endpoint configuration: "auto", "codewhisperer", or "amazonq"
+	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
+
+	// EndpointFallback controls whether other endpoints are tried when the preferred one fails.
+	EndpointFallback *bool `json:"endpointFallback,omitempty"`
+
+	// Optional outbound proxy for Kiro and auth requests.
+	ProxyURL string `json:"proxyURL,omitempty"`
+
+	// LogLevel controls application log verbosity.
+	LogLevel string `json:"logLevel,omitempty"`
 
 	// Global statistics (persisted across restarts)
 	TotalRequests   int     `json:"totalRequests,omitempty"`   // Total API requests received
@@ -140,7 +149,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.0.5"
+const Version = "1.0.7"
 
 var (
 	cfg     *Config
@@ -455,6 +464,51 @@ func UpdatePreferredEndpoint(endpoint string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.PreferredEndpoint = endpoint
+	return Save()
+}
+
+func GetEndpointFallback() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg.EndpointFallback == nil {
+		return true
+	}
+	return *cfg.EndpointFallback
+}
+
+func UpdateEndpointFallback(enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.EndpointFallback = &enabled
+	return Save()
+}
+
+func GetProxyURL() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	return cfg.ProxyURL
+}
+
+func UpdateProxySettings(proxyURL string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ProxyURL = proxyURL
+	return Save()
+}
+
+func GetLogLevel() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.LogLevel == "" {
+		return "info"
+	}
+	return cfg.LogLevel
+}
+
+func UpdateLogLevel(level string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.LogLevel = level
 	return Save()
 }
 

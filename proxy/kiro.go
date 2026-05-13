@@ -28,6 +28,12 @@ type kiroEndpoint struct {
 
 var kiroEndpoints = []kiroEndpoint{
 	{
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "",
+		Name:      "Kiro IDE",
+	},
+	{
 		URL:       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
 		Origin:    "AI_EDITOR",
 		AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
@@ -35,7 +41,7 @@ var kiroEndpoints = []kiroEndpoint{
 	},
 	{
 		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "CLI",
+		Origin:    "AI_EDITOR",
 		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
 		Name:      "AmazonQ",
 	},
@@ -54,6 +60,38 @@ var kiroHttpClient = &http.Client{
 }
 
 // ==================== 请求结构 ====================
+
+var kiroRestHttpClient = &http.Client{Timeout: 30 * time.Second}
+
+func buildKiroTransport(proxyURL string) *http.Transport {
+	t := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  false,
+		ForceAttemptHTTP2:   true,
+	}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			t.Proxy = http.ProxyURL(u)
+			t.ForceAttemptHTTP2 = false
+		}
+	} else {
+		t.Proxy = http.ProxyFromEnvironment
+	}
+	return t
+}
+
+func InitKiroHttpClient(proxyURL string) {
+	kiroHttpClient = &http.Client{
+		Timeout:   5 * time.Minute,
+		Transport: buildKiroTransport(proxyURL),
+	}
+	kiroRestHttpClient = &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: buildKiroTransport(proxyURL),
+	}
+}
 
 // KiroPayload Kiro API 请求体
 type KiroPayload struct {
@@ -149,14 +187,28 @@ type KiroStreamCallback struct {
 
 // getSortedEndpoints 根据首选端点配置排序端点列表
 func getSortedEndpoints(preferred string) []kiroEndpoint {
-	if preferred == "amazonq" {
-		return []kiroEndpoint{kiroEndpoints[1], kiroEndpoints[0]}
+	fallback := config.GetEndpointFallback()
+	var primary int
+	switch preferred {
+	case "kiro":
+		primary = 0
+	case "codewhisperer":
+		primary = 1
+	case "amazonq":
+		primary = 2
+	default:
+		return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1], kiroEndpoints[2]}
 	}
-	if preferred == "codewhisperer" {
-		return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
+	if !fallback {
+		return []kiroEndpoint{kiroEndpoints[primary]}
 	}
-	// "auto" 或空值：默认顺序
-	return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
+	result := []kiroEndpoint{kiroEndpoints[primary]}
+	for i, ep := range kiroEndpoints {
+		if i != primary {
+			result = append(result, ep)
+		}
+	}
+	return result
 }
 
 // CallKiroAPI 调用 Kiro API（流式），双端点自动 fallback
@@ -168,6 +220,11 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	// 由 provider 动态注入 profileArn：始终以当前凭据为准，避免凭据切换/刷新后
 	// 仍带着旧 ARN。
 	payload.ProfileArn = account.ProfileArn
+	if strings.TrimSpace(payload.ProfileArn) == "" {
+		if profileArn, err := ResolveProfileArn(account); err == nil {
+			payload.ProfileArn = profileArn
+		}
+	}
 
 	// 根据配置排序端点
 	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
@@ -193,7 +250,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "*/*")
-		req.Header.Set("X-Amz-Target", ep.AmzTarget)
+		if ep.AmzTarget != "" {
+			req.Header.Set("X-Amz-Target", ep.AmzTarget)
+		}
 		applyKiroBaseHeaders(req, account, headerValues)
 		req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 		req.Header.Set("x-amzn-codewhisperer-optout", "true")
@@ -243,7 +302,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 					headerValues2 := buildStreamingHeaderValues(account, host)
 					req2.Header.Set("Content-Type", "application/json")
 					req2.Header.Set("Accept", "*/*")
-					req2.Header.Set("X-Amz-Target", ep.AmzTarget)
+					if ep.AmzTarget != "" {
+						req2.Header.Set("X-Amz-Target", ep.AmzTarget)
+					}
 					applyKiroBaseHeaders(req2, account, headerValues2)
 					req2.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 					req2.Header.Set("x-amzn-codewhisperer-optout", "true")

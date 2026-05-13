@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"kiro-go/auth"
 	"kiro-go/config"
+	neturl "net/url"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ const overageEnabledUsageLimit = 10000.0
 // GetUsageLimits 获取账户使用量和订阅信息
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
+	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -25,8 +28,7 @@ func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 
 	setKiroHeaders(req, account)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := kiroRestHttpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -57,8 +59,7 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 	setKiroHeaders(req, account)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := kiroRestHttpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +80,7 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 // ListAvailableModels 获取可用模型列表
 func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
+	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -87,8 +89,7 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 
 	setKiroHeaders(req, account)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := kiroRestHttpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +107,79 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 		return nil, err
 	}
 	return result.Models, nil
+}
+
+func ResolveProfileArn(account *config.Account) (string, error) {
+	if account == nil {
+		return "", fmt.Errorf("account is nil")
+	}
+	if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {
+		return profileArn, nil
+	}
+
+	profileArn, err := listAvailableProfiles(account)
+	if err == nil && profileArn != "" {
+		account.ProfileArn = profileArn
+		_ = config.UpdateAccountTokenFull(account.ID, account.AccessToken, account.RefreshToken, account.ExpiresAt, profileArn)
+		return profileArn, nil
+	}
+
+	if account.RefreshToken != "" {
+		res, refreshErr := auth.RefreshToken(account)
+		if refreshErr == nil && res.ProfileArn != "" {
+			account.ProfileArn = res.ProfileArn
+			_ = config.UpdateAccountTokenFull(account.ID, res.AccessToken, res.RefreshToken, res.ExpiresAt, res.ProfileArn)
+			return res.ProfileArn, nil
+		}
+	}
+
+	return "", fmt.Errorf("no available Kiro profile")
+}
+
+func listAvailableProfiles(account *config.Account) (string, error) {
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), strings.NewReader(`{"maxResults":10}`))
+	if err != nil {
+		return "", err
+	}
+	setKiroHeaders(req, account)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := kiroRestHttpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Profiles []struct {
+			Arn string `json:"arn"`
+		} `json:"profiles"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	for _, profile := range result.Profiles {
+		if profileArn := strings.TrimSpace(profile.Arn); profileArn != "" {
+			return profileArn, nil
+		}
+	}
+	return "", fmt.Errorf("empty profile list")
+}
+
+func withProfileArnQuery(rawURL string, account *config.Account) string {
+	if account == nil {
+		return rawURL
+	}
+	profileArn := strings.TrimSpace(account.ProfileArn)
+	if profileArn == "" {
+		return rawURL
+	}
+	return rawURL + "&profileArn=" + neturl.QueryEscape(profileArn)
 }
 
 func setKiroHeaders(req *http.Request, account *config.Account) {

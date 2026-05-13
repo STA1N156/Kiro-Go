@@ -1002,14 +1002,41 @@
                     <label data-i18n="settings.preferredEndpoint"></label>
                     <select id="preferredEndpoint">
                         <option value="auto" data-i18n="settings.endpointAuto"></option>
+                        <option value="kiro">Kiro IDE</option>
                         <option value="codewhisperer">CodeWhisperer</option>
                         <option value="amazonq">AmazonQ</option>
                     </select>
                     <small style="color:#64748b;font-size:12px;margin-top:4px;display:block"
                         data-i18n="settings.endpointHint"></small>
                 </div>
+                <div class="form-group">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                        <input type="checkbox" id="endpointFallback" checked>
+                        <span data-i18n="settings.endpointFallback"></span>
+                    </label>
+                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block"
+                        data-i18n="settings.endpointFallbackHint"></small>
+                </div>
                 <button class="btn btn-primary" onclick="saveEndpointConfig()"
                     data-i18n="settings.saveEndpoint"></button>
+            </div>
+            <div class="card">
+                <div class="card-header"><span class="card-title" data-i18n="settings.proxySettings"></span></div>
+                <div class="form-group">
+                    <label data-i18n="settings.proxyType"></label>
+                    <select id="proxyType" onchange="onProxyTypeChange()">
+                        <option value="none" data-i18n="settings.proxyNone"></option>
+                        <option value="socks5">SOCKS5</option>
+                        <option value="http">HTTP / HTTPS</option>
+                    </select>
+                </div>
+                <div id="proxyFields" style="display:none">
+                    <div class="form-group"><label data-i18n="settings.proxyHost"></label><input id="proxyHost" placeholder="127.0.0.1"></div>
+                    <div class="form-group"><label data-i18n="settings.proxyPort"></label><input id="proxyPort" placeholder="7890"></div>
+                    <div class="form-group"><label data-i18n="settings.proxyUsername"></label><input id="proxyUsername"></div>
+                    <div class="form-group"><label data-i18n="settings.proxyPassword"></label><input id="proxyPassword" type="password"></div>
+                </div>
+                <button class="btn btn-primary" onclick="saveProxyConfig()" data-i18n="settings.saveProxy"></button>
             </div>
             <div class="card">
                 <div class="card-header"><span class="card-title" data-i18n="settings.adminPassword"></span></div>
@@ -1138,8 +1165,19 @@
                 'settings.preferredEndpoint': '首选端点',
                 'settings.endpointAuto': '自动选择',
                 'settings.endpointHint': '选择首选端点，自动选择模式下会根据可用性自动选择端点',
+                'settings.endpointFallback': '端点不可用时自动切换',
+                'settings.endpointFallbackHint': '关闭后，只使用选中的端点，不会自动换到其他端点',
                 'settings.saveEndpoint': '保存端点设置',
                 'settings.endpointSaved': '端点设置已保存',
+                'settings.proxySettings': '出站代理设置',
+                'settings.proxyType': '代理类型',
+                'settings.proxyNone': '不使用代理',
+                'settings.proxyHost': '代理地址',
+                'settings.proxyPort': '端口',
+                'settings.proxyUsername': '用户名（可选）',
+                'settings.proxyPassword': '密码（可选）',
+                'settings.saveProxy': '保存代理设置',
+                'settings.proxySaved': '代理设置已保存',
                 'settings.adminPassword': '管理密码',
                 'settings.newPassword': '新密码',
                 'settings.newPasswordPlaceholder': '输入新密码',
@@ -1195,6 +1233,20 @@
                 'modal.localDesc': '通过 Kiro IDE 本地缓存文件添加账号',
                 'modal.credentialsTitle': '凭证 JSON',
                 'modal.credentialsDesc': '通过 Kiro Account Manager 导出的凭证添加账号',
+                'modal.cookieTitle': 'Kiro 网页 Cookie',
+                'modal.cookieDesc': '通过 Kiro 网页 Cookie 里的 RefreshToken 添加账号',
+                'cookie.howToGet': '如何获取 RefreshToken？',
+                'cookie.step1': '打开并登录',
+                'cookie.step2': '按 F12 → Application → Cookies → https://app.kiro.dev',
+                'cookie.step3': '找到 RefreshToken，复制它的 Value',
+                'cookie.refreshToken': 'RefreshToken',
+                'cookie.provider': '登录方式',
+                'cookie.github': 'GitHub',
+                'cookie.google': 'Google',
+                'cookie.refreshTokenPlaceholder': '粘贴 RefreshToken Cookie 的值',
+                'cookie.refreshTokenMissing': '请填写 RefreshToken',
+                'cookie.importSuccess': '账号添加成功',
+                'cookie.link': 'https://app.kiro.dev/account/usage',
                 'builderid.startLogin': '开始登录',
                 'builderid.verifyCode': '请在浏览器中输入上方验证码',
                 'builderid.verifyUrl': '验证链接',
@@ -1347,8 +1399,19 @@
                 'settings.preferredEndpoint': 'Preferred Endpoint',
                 'settings.endpointAuto': 'Auto',
                 'settings.endpointHint': 'Select preferred endpoint. In auto-select mode, the endpoint is automatically selected based on availability.',
+                'settings.endpointFallback': 'Fallback to other endpoints',
+                'settings.endpointFallbackHint': 'When disabled, only the selected endpoint is used.',
                 'settings.saveEndpoint': 'Save Endpoint Settings',
                 'settings.endpointSaved': 'Endpoint settings saved',
+                'settings.proxySettings': 'Outbound Proxy Settings',
+                'settings.proxyType': 'Proxy Type',
+                'settings.proxyNone': 'No proxy',
+                'settings.proxyHost': 'Proxy host',
+                'settings.proxyPort': 'Port',
+                'settings.proxyUsername': 'Username (optional)',
+                'settings.proxyPassword': 'Password (optional)',
+                'settings.saveProxy': 'Save Proxy Settings',
+                'settings.proxySaved': 'Proxy settings saved',
                 'settings.adminPassword': 'Admin Password',
                 'settings.newPassword': 'New Password',
                 'settings.newPasswordPlaceholder': 'Enter new password',
@@ -1400,6 +1463,20 @@
                 'modal.localDesc': 'Add account via Kiro IDE local cache files',
                 'modal.credentialsTitle': 'Credentials JSON',
                 'modal.credentialsDesc': 'Add account via Kiro Account Manager exported credentials',
+                'modal.cookieTitle': 'Kiro Web Cookie',
+                'modal.cookieDesc': 'Add account via RefreshToken from Kiro Web Cookie',
+                'cookie.howToGet': 'How to get RefreshToken?',
+                'cookie.step1': 'Open and sign in at',
+                'cookie.step2': 'Press F12 → Application → Cookies → https://app.kiro.dev',
+                'cookie.step3': 'Find RefreshToken and copy its Value',
+                'cookie.refreshToken': 'RefreshToken',
+                'cookie.provider': 'Login Provider',
+                'cookie.github': 'GitHub',
+                'cookie.google': 'Google',
+                'cookie.refreshTokenPlaceholder': 'Paste the RefreshToken cookie value here',
+                'cookie.refreshTokenMissing': 'RefreshToken is required',
+                'cookie.importSuccess': 'Account added successfully',
+                'cookie.link': 'https://app.kiro.dev/account/usage',
                 'builderid.startLogin': 'Start Login',
                 'builderid.verifyCode': 'Enter the code above in your browser',
                 'builderid.verifyUrl': 'Verification URL',
@@ -2004,6 +2081,7 @@
             document.getElementById('apiKeyInput').value = d.apiKey || '';
             loadThinkingConfig();
             loadEndpointConfig();
+            loadProxyConfig();
         }
         async function loadThinkingConfig() {
             const res = await fetch('/admin/api/thinking', { headers: { 'X-Admin-Password': password } });
@@ -2024,14 +2102,57 @@
             const res = await fetch('/admin/api/endpoint', { headers: { 'X-Admin-Password': password } });
             const d = await res.json();
             document.getElementById('preferredEndpoint').value = d.preferredEndpoint || 'auto';
+            document.getElementById('endpointFallback').checked = d.endpointFallback !== false;
         }
         async function saveEndpointConfig() {
             const res = await fetch('/admin/api/endpoint', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify({ preferredEndpoint: document.getElementById('preferredEndpoint').value })
+                body: JSON.stringify({ preferredEndpoint: document.getElementById('preferredEndpoint').value, endpointFallback: document.getElementById('endpointFallback').checked })
             });
             const d = await res.json();
             if (d.success) { alert(t('settings.endpointSaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
+        }
+        function onProxyTypeChange() {
+            document.getElementById('proxyFields').style.display = document.getElementById('proxyType').value === 'none' ? 'none' : 'block';
+        }
+        function parseProxyURL(proxyURL) {
+            if (!proxyURL) return { type: 'none', host: '', port: '', username: '', password: '' };
+            try {
+                const u = new URL(proxyURL);
+                return { type: u.protocol.startsWith('socks5') ? 'socks5' : 'http', host: u.hostname, port: u.port, username: decodeURIComponent(u.username || ''), password: decodeURIComponent(u.password || '') };
+            } catch (e) {
+                return { type: 'none', host: '', port: '', username: '', password: '' };
+            }
+        }
+        async function loadProxyConfig() {
+            const res = await fetch('/admin/api/proxy', { headers: { 'X-Admin-Password': password } });
+            const d = await res.json();
+            const p = parseProxyURL(d.proxyURL || '');
+            document.getElementById('proxyType').value = p.type;
+            document.getElementById('proxyHost').value = p.host;
+            document.getElementById('proxyPort').value = p.port;
+            document.getElementById('proxyUsername').value = p.username;
+            document.getElementById('proxyPassword').value = p.password;
+            onProxyTypeChange();
+        }
+        async function saveProxyConfig() {
+            const type = document.getElementById('proxyType').value;
+            let proxyURL = '';
+            if (type !== 'none') {
+                const host = document.getElementById('proxyHost').value.trim();
+                const port = document.getElementById('proxyPort').value.trim();
+                const username = document.getElementById('proxyUsername').value.trim();
+                const passwordValue = document.getElementById('proxyPassword').value;
+                if (!host || !port) return alert(t('common.saveFailed') + ': host/port required');
+                const auth = username ? encodeURIComponent(username) + ':' + encodeURIComponent(passwordValue) + '@' : '';
+                proxyURL = type + '://' + auth + host + ':' + port;
+            }
+            const res = await fetch('/admin/api/proxy', {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ proxyURL })
+            });
+            const d = await res.json();
+            if (d.success) { alert(t('settings.proxySaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
         }
         function generateApiKey() {
             const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -2167,6 +2288,7 @@
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'sso\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.ssoTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.ssoDesc') + '</div></div>' +
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'local\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.localTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.localDesc') + '</div></div>' +
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'credentials\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.credentialsTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.credentialsDesc') + '</div></div>' +
+                    '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'cookie\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.cookieTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.cookieDesc') + '</div></div>' +
                     '</div>' +
                     '<div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">' + t('common.cancel') + '</button></div>';
             } else if (type === 'builderid') {
@@ -2198,6 +2320,13 @@
                     '<div style="font-size:12px;color:#64748b;margin-bottom:12px;line-height:1.5">' + t('credentials.batchHint') + '</div>' +
                     '<div class="form-group"><label>' + t('credentials.label') + '</label><textarea id="credJson" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderId"},{"refreshToken":"yyy","clientId":"...","clientSecret":"...","provider":"Enterprise"}]\' style="min-height:120px"></textarea></div>' +
                     '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importCredentials()">' + t('common.add') + '</button></div>';
+            } else if (type === 'cookie') {
+                title.textContent = t('modal.cookieTitle');
+                body.innerHTML =
+                    '<div style="font-size:13px;color:#64748b;margin-bottom:16px;line-height:1.8"><p style="margin-bottom:8px;font-weight:600;color:#374151">' + t('cookie.howToGet') + '</p><ol style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px"><li>' + t('cookie.step1') + ' <a href="' + t('cookie.link') + '" target="_blank" style="color:#7c3aed;word-break:break-all">' + t('cookie.link') + '</a></li><li>' + t('cookie.step2') + '</li><li>' + t('cookie.step3') + '</li></ol></div>' +
+                    '<div class="form-group"><label>' + t('cookie.provider') + '</label><select id="cookieProvider"><option value="Google">' + t('cookie.google') + '</option><option value="Github">' + t('cookie.github') + '</option></select></div>' +
+                    '<div class="form-group"><label>' + t('cookie.refreshToken') + '</label><textarea id="cookieRefreshToken" placeholder="' + t('cookie.refreshTokenPlaceholder') + '" style="min-height:80px;font-family:monospace;font-size:12px"></textarea></div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importFromCookie()">' + t('common.add') + '</button></div>';
             } else if (type === 'sso') {
                 title.textContent = t('modal.ssoTitle');
                 body.innerHTML =
@@ -2307,6 +2436,19 @@
                 alert(msg);
                 newIds.forEach(id => autoRefreshNewAccount(id));
             } catch (e) { alert(t('credentials.jsonError')); }
+        }
+        async function importFromCookie() {
+            const refreshToken = document.getElementById('cookieRefreshToken').value.trim();
+            if (!refreshToken) { alert(t('cookie.refreshTokenMissing')); return; }
+            const provider = document.getElementById('cookieProvider').value;
+            const payload = { refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider, region: 'us-east-1' };
+            const res = await fetch('/admin/api/auth/credentials', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify(payload) });
+            const d = await res.json();
+            if (d.success) {
+                closeModal(); loadAccounts(); loadStats();
+                alert(t('cookie.importSuccess') + ': ' + (d.account?.email || d.account?.id || 'OK'));
+                autoRefreshNewAccount(d.account?.id);
+            } else alert(t('common.failed') + ': ' + d.error);
         }
         async function importSsoToken() {
             const res = await fetch('/admin/api/auth/sso-token', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify({ bearerToken: document.getElementById('ssoToken').value, region: document.getElementById('ssoRegion').value }) });

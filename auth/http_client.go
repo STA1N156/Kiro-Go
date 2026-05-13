@@ -1,20 +1,41 @@
-// Package auth 提供认证相关功能的 HTTP 客户端
 package auth
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 )
 
-// 全局 HTTP 客户端，复用连接池
-// 用于所有 auth 模块的 HTTP 请求
-var httpClient = &http.Client{
-	Timeout: 30 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:        50,               // 最大空闲连接数
-		MaxIdleConnsPerHost: 10,               // 每个 Host 最大空闲连接数
-		IdleConnTimeout:     90 * time.Second, // 空闲连接超时
-		DisableCompression:  false,            // 启用压缩
-		ForceAttemptHTTP2:   true,             // 尝试使用 HTTP/2
-	},
+// httpClient is shared by auth requests and can be rebuilt when proxy settings change.
+var httpClient *http.Client
+
+func init() {
+	InitHttpClient("")
+}
+
+func buildAuthTransport(proxyURL string) *http.Transport {
+	t := &http.Transport{
+		MaxIdleConns:        50,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  false,
+		ForceAttemptHTTP2:   true,
+	}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			t.Proxy = http.ProxyURL(u)
+			t.ForceAttemptHTTP2 = false
+		}
+	} else {
+		t.Proxy = http.ProxyFromEnvironment
+	}
+	return t
+}
+
+// InitHttpClient rebuilds the auth HTTP client with the current outbound proxy.
+func InitHttpClient(proxyURL string) {
+	httpClient = &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: buildAuthTransport(proxyURL),
+	}
 }
