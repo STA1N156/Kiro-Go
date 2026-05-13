@@ -9,6 +9,7 @@ import (
 	"kiro-go/config"
 	"kiro-go/pool"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,8 @@ type Handler struct {
 	modelsCacheMu   sync.RWMutex
 	modelsCacheTime int64
 	promptCache     *promptCacheTracker
+	// 请求日志
+	requestLogs *RequestLogBuffer
 }
 
 type thinkingStreamSource int
@@ -147,6 +150,7 @@ func NewHandler() *Handler {
 		stopRefresh:     make(chan struct{}),
 		stopStatsSaver:  make(chan struct{}),
 		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
+		requestLogs:     NewRequestLogBuffer(200),
 	}
 	// 启动后台刷新
 	go h.backgroundRefresh()
@@ -656,6 +660,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 // handleClaudeStream Claude 流式响应
 func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
+	startMs := nowMs()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -999,6 +1004,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	if err != nil {
 		h.recordFailure()
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "quota"))
+		h.requestLogs.Add(RequestLog{
+			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
+			Account: account.Email, APIType: "claude", Stream: true,
+			Duration: nowMs() - startMs, Success: false, Error: err.Error(),
+		})
 		h.sendSSE(w, flusher, "error", map[string]interface{}{
 			"type":  "error",
 			"error": map[string]string{"type": "api_error", "message": err.Error()},
@@ -1030,6 +1040,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+	h.requestLogs.Add(RequestLog{
+		ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
+		Account: account.Email, APIType: "claude", Stream: true,
+		InputTokens: inputTokens, OutputTokens: outputTokens, Credits: credits,
+		Duration: nowMs() - startMs, Success: true,
+	})
 	h.promptCache.Update(account.ID, cacheProfile)
 
 	// 发送 message_delta
@@ -1113,6 +1129,7 @@ func (h *Handler) recordFailure() {
 
 // handleClaudeNonStream Claude 非流式响应
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
+	startMs := nowMs()
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
@@ -1146,6 +1163,11 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	if err != nil {
 		h.recordFailure()
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
+		h.requestLogs.Add(RequestLog{
+			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
+			Account: account.Email, APIType: "claude", Stream: false,
+			Duration: nowMs() - startMs, Success: false, Error: err.Error(),
+		})
 		h.sendClaudeError(w, 500, "api_error", err.Error())
 		return
 	}
@@ -1181,6 +1203,12 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 	h.promptCache.Update(account.ID, cacheProfile)
+	h.requestLogs.Add(RequestLog{
+		ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
+		Account: account.Email, APIType: "claude", Stream: false,
+		InputTokens: inputTokens, OutputTokens: outputTokens, Credits: credits,
+		Duration: nowMs() - startMs, Success: true,
+	})
 
 	if thinking && thinkingContent != "" {
 		switch thinkingFormat {
@@ -1272,6 +1300,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 // handleOpenAIStream OpenAI 流式响应
 func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+	startMs := nowMs()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1588,6 +1617,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	if err != nil {
 		h.recordFailure()
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
+		h.requestLogs.Add(RequestLog{
+			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
+			Account: account.Email, APIType: "openai", Stream: true,
+			Duration: nowMs() - startMs, Success: false, Error: err.Error(),
+		})
 		return
 	}
 
@@ -1618,6 +1652,12 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+	h.requestLogs.Add(RequestLog{
+		ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
+		Account: account.Email, APIType: "openai", Stream: true,
+		InputTokens: inputTokens, OutputTokens: outputTokens, Credits: credits,
+		Duration: nowMs() - startMs, Success: true,
+	})
 
 	// 发送结束
 	finishReason := "stop"
@@ -1649,6 +1689,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 
 // handleOpenAINonStream OpenAI 非流式响应
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+	startMs := nowMs()
 	var content string
 	var reasoningContent string
 	var toolUses []KiroToolUse
@@ -1673,6 +1714,11 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	if err != nil {
 		h.recordFailure()
 		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
+		h.requestLogs.Add(RequestLog{
+			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
+			Account: account.Email, APIType: "openai", Stream: false,
+			Duration: nowMs() - startMs, Success: false, Error: err.Error(),
+		})
 		h.sendOpenAIError(w, 500, "server_error", err.Error())
 		return
 	}
@@ -1699,6 +1745,12 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+	h.requestLogs.Add(RequestLog{
+		ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
+		Account: account.Email, APIType: "openai", Stream: false,
+		InputTokens: inputTokens, OutputTokens: outputTokens, Credits: credits,
+		Duration: nowMs() - startMs, Success: true,
+	})
 
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 	resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
@@ -1822,6 +1874,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetVersion(w, r)
 	case path == "/export" && r.Method == "POST":
 		h.apiExportAccounts(w, r)
+	case path == "/logs" && r.Method == "GET":
+		h.apiGetLogs(w, r)
 	default:
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})
@@ -2982,4 +3036,24 @@ func (h *Handler) handleRefreshErr(account *config.Account, err error) error {
 		fmt.Printf("[Refresh] Account %s disabled (invalid_grant)\n", account.Email)
 	}
 	return err
+}
+
+func (h *Handler) apiGetLogs(w http.ResponseWriter, r *http.Request) {
+	n := 50
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 {
+			n = v
+		}
+	}
+	if n > 200 {
+		n = 200
+	}
+	logs := h.requestLogs.Recent(n)
+	if logs == nil {
+		logs = []RequestLog{}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total": h.requestLogs.Count(),
+		"logs":  logs,
+	})
 }
