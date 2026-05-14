@@ -1042,11 +1042,20 @@
                     <label data-i18n="settings.preferredEndpoint"></label>
                     <select id="preferredEndpoint">
                         <option value="auto" data-i18n="settings.endpointAuto"></option>
+                        <option value="kiro">Kiro IDE</option>
                         <option value="codewhisperer">CodeWhisperer</option>
                         <option value="amazonq">AmazonQ</option>
                     </select>
                     <small style="color:#64748b;font-size:12px;margin-top:4px;display:block"
                         data-i18n="settings.endpointHint"></small>
+                </div>
+                <div class="form-group">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                        <input type="checkbox" id="endpointFallback" checked>
+                        <span data-i18n="settings.endpointFallback"></span>
+                    </label>
+                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block"
+                        data-i18n="settings.endpointFallbackHint"></small>
                 </div>
                 <button class="btn btn-primary" onclick="saveEndpointConfig()"
                     data-i18n="settings.saveEndpoint"></button>
@@ -1056,6 +1065,34 @@
                 <div class="form-group"><label data-i18n="settings.newPassword"></label><input type="password"
                         id="newPassword" data-i18n-placeholder="settings.newPasswordPlaceholder"></div>
                 <button class="btn btn-primary" onclick="changePassword()" data-i18n="settings.changePassword"></button>
+            </div>
+            <div class="card">
+                <div class="card-header"><span class="card-title" data-i18n="settings.proxySettings"></span></div>
+                <div class="form-group">
+                    <label data-i18n="settings.proxyType"></label>
+                    <select id="proxyType" onchange="onProxyTypeChange()">
+                        <option value="none" data-i18n="settings.proxyNone"></option>
+                        <option value="socks5">SOCKS5</option>
+                        <option value="http">HTTP</option>
+                    </select>
+                </div>
+                <div id="proxyFields" style="display:none">
+                    <div class="form-group">
+                        <label data-i18n="settings.proxyHost"></label>
+                        <div style="display:flex;gap:8px;align-items:stretch">
+                            <input type="text" id="proxyHost" style="flex:1" placeholder="127.0.0.1">
+                            <input type="number" id="proxyPort" style="width:90px" placeholder="1080" min="1" max="65535">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="settings.proxyAuth"></label>
+                        <div style="display:flex;gap:8px">
+                            <input type="text" id="proxyUsername" style="flex:1" data-i18n-placeholder="settings.proxyUsername" autocomplete="off">
+                            <input type="password" id="proxyPassword" style="flex:1" data-i18n-placeholder="settings.proxyPassword" autocomplete="new-password">
+                        </div>
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="saveProxyConfig()" data-i18n="settings.saveProxy"></button>
             </div>
             <div class="card">
                 <div class="card-header"><span class="card-title" data-i18n="settings.statistics"></span></div>
@@ -1175,6 +1212,7 @@
                 'accounts.copyJSON': '复制 JSON',
                 'accounts.copyJSONSuccess': 'JSON 已复制到剪贴板',
                 'accounts.trialDays': '天后到期',
+                'accounts.overage': '超额调用',
                 'time.expired': '已过期',
                 'time.minutes': '分钟',
                 'time.hours': '小时',
@@ -1201,6 +1239,8 @@
                 'settings.preferredEndpoint': '首选端点',
                 'settings.endpointAuto': '自动选择',
                 'settings.endpointHint': '选择首选端点，自动选择模式下会根据可用性自动选择端点',
+                'settings.endpointFallback': '端点不可用时自动切换',
+                'settings.endpointFallbackHint': '关闭后，仅使用选定的端点，不会自动切换到其他端点',
                 'settings.saveEndpoint': '保存端点设置',
                 'settings.endpointSaved': '端点设置已保存',
                 'settings.adminPassword': '管理密码',
@@ -1212,6 +1252,16 @@
                 'settings.statistics': '统计',
                 'settings.resetStats': '重置统计',
                 'settings.confirmReset': '确定重置统计？',
+                'settings.proxySettings': '出站代理设置',
+                'settings.proxyType': '代理类型',
+                'settings.proxyNone': '直连（不使用代理）',
+                'settings.proxyHost': '地址 / 端口',
+                'settings.proxyAuth': '认证（可选）',
+                'settings.proxyUsername': '用户名',
+                'settings.proxyPassword': '密码',
+                'settings.proxyHostRequired': '请填写代理地址和端口',
+                'settings.saveProxy': '保存代理设置',
+                'settings.proxySaved': '代理设置已保存',
                 'api.endpoints': 'API 端点',
                 'api.modelList': '模型列表',
                 'api.stats': '统计数据',
@@ -1258,6 +1308,20 @@
                 'modal.localDesc': '通过 Kiro IDE 本地缓存文件添加账号',
                 'modal.credentialsTitle': '凭证 JSON',
                 'modal.credentialsDesc': '通过 Kiro Account Manager 导出的凭证添加账号',
+                'modal.cookieTitle': 'Kiro 网页 Cookie',
+                'modal.cookieDesc': '通过从 Kiro 网页 Cookie 中获取的 RefreshToken 添加账号',
+                'cookie.howToGet': '如何获取 RefreshToken？',
+                'cookie.step1': '打开浏览器，访问并登录',
+                'cookie.step2': '在页面空白处右键 → 检查 → Application → Cookies → https://app.kiro.dev',
+                'cookie.step3': '在列表中找到 <b>RefreshToken</b>，双击其 Value 列并复制',
+                'cookie.refreshToken': 'RefreshToken',
+                'cookie.provider': '登录方式',
+                'cookie.github': 'GitHub',
+                'cookie.google': 'Google',
+                'cookie.refreshTokenPlaceholder': '粘贴 RefreshToken Cookie 的值',
+                'cookie.refreshTokenMissing': '请填写 RefreshToken',
+                'cookie.importSuccess': '账号添加成功',
+                'cookie.link': 'https://app.kiro.dev/account/usage',
                 'builderid.startLogin': '开始登录',
                 'builderid.verifyCode': '请在浏览器中输入上方验证码',
                 'builderid.verifyUrl': '验证链接',
@@ -1347,7 +1411,10 @@
                 'filter.banned': '已封禁',
                 'accounts.weight': '权重',
                 'detail.weight': '请求权重',
-                'detail.weightHint': '0-1=普通, 2+=高优先级'
+                'detail.weightHint': '0-1=普通, 2+=高优先级',
+                'detail.overage': '超额调用设置',
+                'detail.allowOverage': '配额耗尽后继续调用',
+                'detail.overageHint': '超额后调用频率权重（1~10），值越大频率越高'
             },
             en: {
                 'login.subtitle': 'Enter admin password to login',
@@ -1407,6 +1474,7 @@
                 'accounts.confirmDelete': 'Confirm delete?',
                 'accounts.copyJSON': 'Copy JSON',
                 'accounts.copyJSONSuccess': 'JSON copied to clipboard',
+                'accounts.overage': 'Overage',
                 'time.expired': 'Expired',
                 'time.minutes': 'min',
                 'time.hours': 'hr',
@@ -1433,6 +1501,8 @@
                 'settings.preferredEndpoint': 'Preferred Endpoint',
                 'settings.endpointAuto': 'Auto',
                 'settings.endpointHint': 'Select preferred endpoint. In auto-select mode, the endpoint is automatically selected based on availability.',
+                'settings.endpointFallback': 'Fallback to other endpoints',
+                'settings.endpointFallbackHint': 'When disabled, only the selected endpoint is used without automatic fallback',
                 'settings.saveEndpoint': 'Save Endpoint Settings',
                 'settings.endpointSaved': 'Endpoint settings saved',
                 'settings.adminPassword': 'Admin Password',
@@ -1444,6 +1514,16 @@
                 'settings.statistics': 'Statistics',
                 'settings.resetStats': 'Reset Statistics',
                 'settings.confirmReset': 'Confirm reset statistics?',
+                'settings.proxySettings': 'Outbound Proxy Settings',
+                'settings.proxyType': 'Proxy Type',
+                'settings.proxyNone': 'Direct (no proxy)',
+                'settings.proxyHost': 'Host / Port',
+                'settings.proxyAuth': 'Authentication (optional)',
+                'settings.proxyUsername': 'Username',
+                'settings.proxyPassword': 'Password',
+                'settings.proxyHostRequired': 'Please enter proxy host and port',
+                'settings.saveProxy': 'Save Proxy Settings',
+                'settings.proxySaved': 'Proxy settings saved',
                 'api.endpoints': 'API Endpoints',
                 'api.modelList': 'Model List',
                 'api.stats': 'Statistics',
@@ -1486,6 +1566,20 @@
                 'modal.localDesc': 'Add account via Kiro IDE local cache files',
                 'modal.credentialsTitle': 'Credentials JSON',
                 'modal.credentialsDesc': 'Add account via Kiro Account Manager exported credentials',
+                'modal.cookieTitle': 'Kiro Web Cookie',
+                'modal.cookieDesc': 'Add account via RefreshToken obtained from Kiro Web Cookie',
+                'cookie.howToGet': 'How to get the RefreshToken?',
+                'cookie.step1': 'Open your browser and sign in at',
+                'cookie.step2': 'Right-click on blank area → Inspect → Application → Cookies → https://app.kiro.dev',
+                'cookie.step3': 'Find <b>RefreshToken</b> in the list, double-click its Value and copy it',
+                'cookie.refreshToken': 'RefreshToken',
+                'cookie.provider': 'Login Provider',
+                'cookie.github': 'GitHub',
+                'cookie.google': 'Google',
+                'cookie.refreshTokenPlaceholder': 'Paste the RefreshToken cookie value here',
+                'cookie.refreshTokenMissing': 'RefreshToken is required',
+                'cookie.importSuccess': 'Account added successfully',
+                'cookie.link': 'https://app.kiro.dev/account/usage',
                 'builderid.startLogin': 'Start Login',
                 'builderid.verifyCode': 'Enter the code above in your browser',
                 'builderid.verifyUrl': 'Verification URL',
@@ -1575,7 +1669,10 @@
                 'filter.banned': 'Banned',
                 'accounts.weight': 'Weight',
                 'detail.weight': 'Request Weight',
-                'detail.weightHint': '0-1=normal, 2+=higher priority'
+                'detail.weightHint': '0-1=normal, 2+=higher priority',
+                'detail.overage': 'Overage Settings',
+                'detail.allowOverage': 'Continue calling after quota is exhausted',
+                'detail.overageHint': 'Call frequency weight when over quota (1–10); higher = more frequent'
             }
         };
         let currentLang = localStorage.getItem('kiro_lang') || 'zh';
@@ -1917,6 +2014,7 @@
                 const isSelected = selectedAccounts.has(a.id);
                 const weightVal = a.weight || 0;
                 const weightBadge = weightVal >= 2 ? '<span class="badge" style="background:#f59e0b;color:#fff">W:' + weightVal + '</span>' : '';
+                const overageBadge = a.allowOverage ? '<span class="badge badge-warning">' + t('accounts.overage') + ':' + (a.overageWeight || 1) + '</span>' : '';
                 return '<div class="account-card" style="' + (isSelected ? 'border-color:#7c3aed;background:#faf5ff' : '') + '">' +
                     '<div class="account-header">' +
                     '<div class="account-info" style="display:flex;align-items:center;gap:8px">' +
@@ -1927,6 +2025,7 @@
                     getSubBadge(a.subscriptionType) +
                     getTrialBadge(a) +
                     weightBadge +
+                    overageBadge +
                     '<span class="badge badge-info">' + formatAuthMethod(a.provider || a.authMethod) + '</span>' +
                     getStatusBadge(a) +
                     '</div>' +
@@ -2063,6 +2162,12 @@
                 '<span style="color:#64748b;font-size:12px;flex:1">' + t('detail.weightHint') + '</span>' +
                 '<button class="btn btn-sm btn-primary" onclick="saveWeight(\'' + id + '\')">' + t('common.saved').split(' ')[0] + '</button>' +
                 '</div></div>' +
+                '<div class="detail-section"><h4>' + t('detail.overage') + '</h4><div class="machine-id-row">' +
+                '<label style="display:flex;align-items:center;gap:8px;white-space:nowrap"><label class="switch" style="margin:0"><input type="checkbox" id="allowOverageInput" ' + (a.allowOverage ? 'checked' : '') + '><span class="slider"></span></label><span style="font-size:13px">' + t('detail.allowOverage') + '</span></label>' +
+                '<input type="number" id="overageWeightInput" value="' + (a.overageWeight || 1) + '" min="1" max="10" style="width:80px">' +
+                '<span style="color:#64748b;font-size:12px;flex:1">' + t('detail.overageHint') + '</span>' +
+                '<button class="btn btn-sm btn-primary" onclick="saveOverageSettings(\'' + id + '\')">' + t('common.saved').split(' ')[0] + '</button>' +
+                '</div></div>' +
                 '<div class="detail-section"><h4>' + t('detail.subscription') + '</h4><div class="detail-grid">' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.subscriptionType') + '</div><div class="detail-value">' + (a.subscriptionTitle || a.subscriptionType || '-') + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.tokenExpiry') + '</div><div class="detail-value">' + (a.expiresAt ? new Date(a.expiresAt * 1000).toLocaleString() : '-') + '</div></div>' +
@@ -2141,6 +2246,20 @@
                 if (d.success) { alert(t('detail.saved')); loadAccounts(); } else { alert(t('detail.saveFailed') + ': ' + d.error); }
             } catch (e) { alert(t('detail.saveFailed')); }
         }
+        async function saveOverageSettings(id) {
+            const allowOverage = document.getElementById('allowOverageInput').checked;
+            let overageWeight = parseInt(document.getElementById('overageWeightInput').value) || 1;
+            overageWeight = Math.max(1, Math.min(10, overageWeight));
+            document.getElementById('overageWeightInput').value = overageWeight;
+            try {
+                const res = await fetch('/admin/api/accounts/' + id, {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ allowOverage, overageWeight })
+                });
+                const d = await res.json();
+                if (d.success) { alert(t('detail.saved')); loadAccounts(); } else { alert(t('detail.saveFailed') + ': ' + d.error); }
+            } catch (e) { alert(t('detail.saveFailed')); }
+        }
         async function quickSetWeight(id, value) {
             const weight = parseInt(value) || 0;
             try {
@@ -2156,6 +2275,7 @@
             loadApiKeys();
             loadThinkingConfig();
             loadEndpointConfig();
+            loadProxyConfig();
         }
         async function loadApiKeys() {
             const res = await fetch('/admin/api/apikeys', { headers: { 'X-Admin-Password': password } });
@@ -2233,14 +2353,61 @@
             const res = await fetch('/admin/api/endpoint', { headers: { 'X-Admin-Password': password } });
             const d = await res.json();
             document.getElementById('preferredEndpoint').value = d.preferredEndpoint || 'auto';
+            document.getElementById('endpointFallback').checked = d.endpointFallback !== false;
         }
         async function saveEndpointConfig() {
             const res = await fetch('/admin/api/endpoint', {
                 method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
-                body: JSON.stringify({ preferredEndpoint: document.getElementById('preferredEndpoint').value })
+                body: JSON.stringify({ preferredEndpoint: document.getElementById('preferredEndpoint').value, endpointFallback: document.getElementById('endpointFallback').checked })
             });
             const d = await res.json();
             if (d.success) { alert(t('settings.endpointSaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
+        }
+        async function loadProxyConfig() {
+            const res = await fetch('/admin/api/proxy', { headers: { 'X-Admin-Password': password } });
+            const d = await res.json();
+            const proxyURL = d.proxyURL || '';
+            if (!proxyURL) {
+                document.getElementById('proxyType').value = 'none';
+                document.getElementById('proxyFields').style.display = 'none';
+                return;
+            }
+            try {
+                const u = new URL(proxyURL);
+                const scheme = u.protocol.replace(':', '');
+                document.getElementById('proxyType').value = scheme.startsWith('socks5') ? 'socks5' : 'http';
+                document.getElementById('proxyHost').value = u.hostname;
+                document.getElementById('proxyPort').value = u.port;
+                document.getElementById('proxyUsername').value = decodeURIComponent(u.username);
+                document.getElementById('proxyPassword').value = decodeURIComponent(u.password);
+                document.getElementById('proxyFields').style.display = '';
+            } catch(e) {
+                document.getElementById('proxyType').value = 'none';
+                document.getElementById('proxyFields').style.display = 'none';
+            }
+        }
+        function onProxyTypeChange() {
+            const type = document.getElementById('proxyType').value;
+            document.getElementById('proxyFields').style.display = type === 'none' ? 'none' : '';
+        }
+        async function saveProxyConfig() {
+            const type = document.getElementById('proxyType').value;
+            let proxyURL = '';
+            if (type !== 'none') {
+                const host = document.getElementById('proxyHost').value.trim();
+                const port = document.getElementById('proxyPort').value.trim();
+                if (!host || !port) { alert(t('settings.proxyHostRequired')); return; }
+                const user = document.getElementById('proxyUsername').value.trim();
+                const pass = document.getElementById('proxyPassword').value.trim();
+                const auth = user ? (pass ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : `${encodeURIComponent(user)}@`) : '';
+                proxyURL = `${type}://${auth}${host}:${port}`;
+            }
+            const res = await fetch('/admin/api/proxy', {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ proxyURL })
+            });
+            const d = await res.json();
+            if (d.success) { alert(t('settings.proxySaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
         }
         async function changePassword() {
             const newPwd = document.getElementById('newPassword').value;
@@ -2352,6 +2519,7 @@
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'sso\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.ssoTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.ssoDesc') + '</div></div>' +
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'local\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.localTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.localDesc') + '</div></div>' +
                     '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'credentials\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.credentialsTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.credentialsDesc') + '</div></div>' +
+                    '<div class="card" style="margin:0;cursor:pointer;border:2px solid transparent;transition:border-color 0.2s" onclick="showModal(\'cookie\')" onmouseover="this.style.borderColor=\'#7c3aed\'" onmouseout="this.style.borderColor=\'transparent\'"><div style="font-weight:600;margin-bottom:6px">' + t('modal.cookieTitle') + '</div><div style="font-size:13px;color:#64748b">' + t('modal.cookieDesc') + '</div></div>' +
                     '</div>' +
                     '<div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal()">' + t('common.cancel') + '</button></div>';
             } else if (type === 'builderid') {
@@ -2383,6 +2551,13 @@
                     '<div style="font-size:12px;color:#64748b;margin-bottom:12px;line-height:1.5">' + t('credentials.batchHint') + '</div>' +
                     '<div class="form-group"><label>' + t('credentials.label') + '</label><textarea id="credJson" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderId"},{"refreshToken":"yyy","clientId":"...","clientSecret":"...","provider":"Enterprise"}]\' style="min-height:120px"></textarea></div>' +
                     '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importCredentials()">' + t('common.add') + '</button></div>';
+            } else if (type === 'cookie') {
+                title.textContent = t('modal.cookieTitle');
+                body.innerHTML =
+                    '<div style="font-size:13px;color:#64748b;margin-bottom:16px;line-height:1.8"><p style="margin-bottom:8px;font-weight:600;color:#374151">' + t('cookie.howToGet') + '</p><ol style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px"><li>' + t('cookie.step1') + ' <a href="' + t('cookie.link') + '" target="_blank" style="color:#7c3aed;word-break:break-all">' + t('cookie.link') + '</a></li><li>' + t('cookie.step2') + '</li><li>' + t('cookie.step3') + '</li></ol></div>' +
+                    '<div class="form-group"><label>' + t('cookie.provider') + '</label><select id="cookieProvider"><option value="Google">' + t('cookie.google') + '</option><option value="Github">' + t('cookie.github') + '</option></select></div>' +
+                    '<div class="form-group"><label>' + t('cookie.refreshToken') + '</label><textarea id="cookieRefreshToken" placeholder="' + t('cookie.refreshTokenPlaceholder') + '" style="min-height:80px;font-family:monospace;font-size:12px"></textarea></div>' +
+                    '<div class="modal-footer"><button class="btn btn-secondary" onclick="showModal(\'add\')">' + t('common.back') + '</button><button class="btn btn-primary" onclick="importFromCookie()">' + t('common.add') + '</button></div>';
             } else if (type === 'sso') {
                 title.textContent = t('modal.ssoTitle');
                 body.innerHTML =
@@ -2492,6 +2667,16 @@
                 alert(msg);
                 newIds.forEach(id => autoRefreshNewAccount(id));
             } catch (e) { alert(t('credentials.jsonError')); }
+        }
+        async function importFromCookie() {
+            const refreshToken = document.getElementById('cookieRefreshToken').value.trim();
+            if (!refreshToken) { alert(t('cookie.refreshTokenMissing')); return; }
+            const provider = document.getElementById('cookieProvider').value;
+            const payload = { refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider };
+            const res = await fetch('/admin/api/auth/credentials', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify(payload) });
+            const d = await res.json();
+            if (d.success) { closeModal(); loadAccounts(); loadStats(); alert(t('cookie.importSuccess') + ': ' + (d.account?.email || d.account?.id)); autoRefreshNewAccount(d.account?.id); }
+            else alert(t('common.failed') + ': ' + d.error);
         }
         async function importSsoToken() {
             const res = await fetch('/admin/api/auth/sso-token', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password }, body: JSON.stringify({ bearerToken: document.getElementById('ssoToken').value, region: document.getElementById('ssoRegion').value }) });

@@ -8,6 +8,7 @@ import (
 	"io"
 	"kiro-go/auth"
 	"kiro-go/config"
+	"kiro-go/logger"
 	"kiro-go/pool"
 	"net/http"
 	"strconv"
@@ -71,6 +72,9 @@ func validateClaudeRequestShape(req *ClaudeRequest) string {
 	if len(req.Messages) == 0 {
 		return "messages must not be empty"
 	}
+	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
+		return msg
+	}
 
 	hasUserContext := false
 	lastRole := ""
@@ -97,6 +101,75 @@ func validateClaudeRequestShape(req *ClaudeRequest) string {
 		return "at least one non-empty user message is required"
 	}
 	return ""
+}
+
+func validateClaudeThinkingConfig(thinking *ClaudeThinkingConfig, maxTokens int) string {
+	if thinking == nil {
+		return ""
+	}
+
+	kind := strings.ToLower(strings.TrimSpace(thinking.Type))
+	switch kind {
+	case "enabled":
+		if maxTokens == 0 {
+			return "thinking.type enabled cannot be used with max_tokens=0"
+		}
+		if thinking.BudgetTokens <= 0 {
+			return "thinking.budget_tokens is required when thinking.type is enabled"
+		}
+		if thinking.BudgetTokens < 1024 {
+			return "thinking.budget_tokens must be at least 1024"
+		}
+		if maxTokens > 0 && thinking.BudgetTokens >= maxTokens {
+			return "thinking.budget_tokens must be less than max_tokens"
+		}
+	case "adaptive":
+		if thinking.BudgetTokens != 0 {
+			return "thinking.budget_tokens is not supported when thinking.type is adaptive"
+		}
+	case "disabled":
+		if thinking.BudgetTokens != 0 {
+			return "thinking.budget_tokens is not supported when thinking.type is disabled"
+		}
+	default:
+		return "thinking.type must be one of: enabled, adaptive, disabled"
+	}
+
+	display := strings.ToLower(strings.TrimSpace(thinking.Display))
+	if display != "" && display != "summarized" && display != "omitted" {
+		return "thinking.display must be one of: summarized, omitted"
+	}
+	if kind == "disabled" && display != "" {
+		return "thinking.display is not supported when thinking.type is disabled"
+	}
+
+	return ""
+}
+
+type claudeThinkingResponseOptions struct {
+	Format      string
+	OmitDisplay bool
+}
+
+func resolveClaudeThinkingResponseOptions(thinking *ClaudeThinkingConfig, defaultFormat string) claudeThinkingResponseOptions {
+	opts := claudeThinkingResponseOptions{Format: defaultFormat}
+	if opts.Format == "" {
+		opts.Format = "thinking"
+	}
+	if thinking == nil {
+		return opts
+	}
+
+	display := strings.ToLower(strings.TrimSpace(thinking.Display))
+	switch display {
+	case "summarized":
+		opts.Format = "thinking"
+	case "omitted":
+		opts.Format = "thinking"
+		opts.OmitDisplay = true
+	}
+
+	return opts
 }
 
 func validateOpenAIRequestShape(req *OpenAIRequest) string {
@@ -139,6 +212,9 @@ func validateOpenAIRequestShape(req *OpenAIRequest) string {
 }
 
 func NewHandler() *Handler {
+	// 启动时应用代理配置
+	applyProxyConfig(config.GetProxyURL())
+
 	totalReq, successReq, failedReq, totalTokens, totalCredits := config.GetStats()
 	h := &Handler{
 		pool:            pool.GetPool(),
@@ -195,7 +271,7 @@ func (h *Handler) refreshAllAccounts() {
 			res, err := auth.RefreshToken(account)
 			if err != nil {
 				h.handleRefreshErr(account, err)
-				fmt.Printf("[BackgroundRefresh] Token refresh failed for %s: %v\n", account.Email, err)
+				logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
 				continue
 			}
 			account.AccessToken = res.AccessToken
@@ -213,12 +289,12 @@ func (h *Handler) refreshAllAccounts() {
 		// 刷新账户信息
 		info, err := RefreshAccountInfo(account)
 		if err != nil {
-			fmt.Printf("[BackgroundRefresh] Failed to refresh %s: %v\n", account.Email, err)
+			logger.Warnf("[BackgroundRefresh] Failed to refresh %s: %v", account.Email, err)
 			continue
 		}
 
 		config.UpdateAccountInfo(account.ID, *info)
-		fmt.Printf("[BackgroundRefresh] Refreshed %s: %s %.1f/%.1f\n", account.Email, info.SubscriptionType, info.UsageCurrent, info.UsageLimit)
+		logger.Infof("[BackgroundRefresh] Refreshed %s: %s %.1f/%.1f", account.Email, info.SubscriptionType, info.UsageCurrent, info.UsageLimit)
 	}
 	h.pool.Reload()
 }
@@ -253,6 +329,9 @@ func (h *Handler) validateApiKey(r *http.Request) (bool, string) {
 // ServeHTTP 路由分发
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+
+	// Debug-level request trace for fine-grained visibility
+	logger.Debugf("[HTTP] %s %s from %s", r.Method, path, r.RemoteAddr)
 
 	// CORS - 完整的头部支持
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -486,13 +565,13 @@ func (h *Handler) refreshModelsCache() {
 	for i := range accounts {
 		account := &accounts[i]
 		if err := h.ensureValidToken(account); err != nil {
-			fmt.Printf("[ModelsCache] Skip %s token refresh failed: %v\n", account.Email, err)
+			logger.Warnf("[ModelsCache] Skip %s token refresh failed: %v", account.Email, err)
 			continue
 		}
 
 		models, err := ListAvailableModels(account)
 		if err != nil {
-			fmt.Printf("[ModelsCache] Failed to refresh for %s: %v\n", account.Email, err)
+			logger.Warnf("[ModelsCache] Failed to refresh for %s: %v", account.Email, err)
 			continue
 		}
 		aggregated = mergeUniqueModels(aggregated, models)
@@ -503,7 +582,7 @@ func (h *Handler) refreshModelsCache() {
 		h.cachedModels = aggregated
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
-		fmt.Printf("[ModelsCache] Cached %d models\n", len(aggregated))
+		logger.Infof("[ModelsCache] Cached %d models", len(aggregated))
 	}
 }
 
@@ -595,8 +674,17 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
+		h.sendClaudeError(w, 400, "invalid_request_error", msg)
+		return
+	}
 
-	estimatedTokens := estimateClaudeRequestInputTokens(&req)
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	req.Model = actualModel
+	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
+
+	estimatedTokens := estimateClaudeRequestInputTokens(effectiveReq)
 	if estimatedTokens < 1 {
 		estimatedTokens = 1
 	}
@@ -651,6 +739,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	actualModel, thinkingPrompt := ResolveClaudeThinking(&req, thinkingCfg.Suffix)
 	req.Model = actualModel
 	thinking := thinkingPrompt != ""
+	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
 	cacheProfile := h.promptCache.BuildClaudeProfile(&req, estimatedInputTokens)
 	cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
@@ -661,14 +750,14 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// 流式或非流式
 	keyName, _ := r.Context().Value(ctxKeyName).(string)
 	if req.Stream {
-		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheUsage, cacheProfile, keyName)
+		h.handleClaudeStream(w, account, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheUsage, cacheProfile, keyName)
 	} else {
-		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheUsage, cacheProfile, keyName)
+		h.handleClaudeNonStream(w, account, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheUsage, cacheProfile, keyName)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile, keyName string) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile, keyName string) {
 	startMs := nowMs()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -681,11 +770,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	}
 
 	// 获取 thinking 输出格式配置
-	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
+	thinkingFormat := thinkingOpts.Format
 
 	msgID := "msg_" + uuid.New().String()
 	var inputTokens, outputTokens int
 	var credits float64
+	var realInputTokens int
 	var toolUses []KiroToolUse
 	var nextContentIndex int
 	var rawContentBuilder strings.Builder
@@ -797,6 +887,19 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 				"delta": map[string]string{"type": "text_delta", "text": text},
 			})
 		default:
+			if thinkingOpts.OmitDisplay {
+				if thinkingState == 1 {
+					startContentBlock("thinking")
+					return
+				}
+				if thinkingState == 3 {
+					if activeBlockType != "thinking" {
+						startContentBlock("thinking")
+					}
+					closeActiveBlock()
+				}
+				return
+			}
 			if thinkingState == 3 && text == "" {
 				if activeBlockType == "thinking" {
 					closeActiveBlock()
@@ -1007,6 +1110,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 		OnCredits: func(c float64) {
 			credits = c
 		},
+		OnContextUsage: func(pct float64) {
+			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+		},
 	}
 
 	err := CallKiroAPI(account, payload, callback)
@@ -1033,7 +1139,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	}
 	closeActiveBlock()
 
-	if inputTokens <= 0 {
+	if realInputTokens > 0 {
+		inputTokens = realInputTokens
+	} else if inputTokens <= 0 {
 		inputTokens = estimatedInputTokens
 	}
 	outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
@@ -1137,13 +1245,14 @@ func (h *Handler) recordFailure() {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile, keyName string) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile, keyName string) {
 	startMs := nowMs()
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
 	var inputTokens, outputTokens int
 	var credits float64
+	var realInputTokens int
 
 	callback := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
@@ -1166,6 +1275,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		OnCredits: func(c float64) {
 			credits = c
 		},
+		OnContextUsage: func(pct float64) {
+			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+		},
 	}
 
 	err := CallKiroAPI(account, payload, callback)
@@ -1182,18 +1294,19 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	}
 
 	// 合并 thinking 内容（如果有 reasoningContentEvent 的内容）
-	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
+	thinkingFormat := thinkingOpts.Format
 	finalContent, extractedReasoning := extractThinkingFromContent(content)
 	// 合并流式 reasoning 与 <thinking> 标签内的内容；非 thinking 模式下丢弃。
+	rawThinkingContent := thinkingContent
 	if thinking && extractedReasoning != "" {
-		if thinkingContent == "" {
-			thinkingContent = extractedReasoning
+		if rawThinkingContent == "" {
+			rawThinkingContent = extractedReasoning
 		} else {
-			thinkingContent += extractedReasoning
+			rawThinkingContent += extractedReasoning
 		}
 	}
 	if !thinking {
-		thinkingContent = ""
+		rawThinkingContent = ""
 	}
 
 	// 兜底：模型偶尔会把工具调用以 "[Called X with args: {...}]" 的纯文本形式输出。
@@ -1203,10 +1316,12 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		toolUses = append(toolUses, bracketCalls...)
 	}
 
-	if inputTokens <= 0 {
+	if realInputTokens > 0 {
+		inputTokens = realInputTokens
+	} else if inputTokens <= 0 {
 		inputTokens = estimatedInputTokens
 	}
-	outputTokens = estimateClaudeOutputTokens(finalContent, thinkingContent, toolUses)
+	outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
@@ -1219,19 +1334,25 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		Duration: nowMs() - startMs, Success: true, KeyName: keyName,
 	})
 
-	if thinking && thinkingContent != "" {
+	responseThinkingContent := rawThinkingContent
+	includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
+	if includeEmptyThinkingBlock {
+		responseThinkingContent = ""
+	}
+
+	if thinking && responseThinkingContent != "" {
 		switch thinkingFormat {
 		case "think":
-			finalContent = "<think>" + thinkingContent + "</think>" + finalContent
-			thinkingContent = ""
+			finalContent = "<think>" + responseThinkingContent + "</think>" + finalContent
+			responseThinkingContent = ""
 		case "reasoning_content":
-			finalContent = thinkingContent + finalContent // Claude 格式不支持 reasoning_content，直接拼接
-			thinkingContent = ""
+			finalContent = responseThinkingContent + finalContent // Claude 格式不支持 reasoning_content，直接拼接
+			responseThinkingContent = ""
 		default:
 		}
 	}
 
-	resp := KiroToClaudeResponse(finalContent, thinkingContent, toolUses, inputTokens, outputTokens, model)
+	resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
 	resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 	resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
 	resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
@@ -1329,6 +1450,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	var toolCallIndex int
 	var inputTokens, outputTokens int
 	var credits float64
+	var realInputTokens int
 	var rawContentBuilder strings.Builder
 	var rawReasoningBuilder strings.Builder
 
@@ -1621,6 +1743,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		OnCredits: func(c float64) {
 			credits = c
 		},
+		OnContextUsage: func(pct float64) {
+			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+		},
 	}
 
 	err := CallKiroAPI(account, payload, callback)
@@ -1642,7 +1767,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 		eventThinkingOpen = false
 	}
 
-	if inputTokens <= 0 {
+	if realInputTokens > 0 {
+		inputTokens = realInputTokens
+	} else if inputTokens <= 0 {
 		inputTokens = estimatedInputTokens
 	}
 	outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
@@ -1705,6 +1832,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	var toolUses []KiroToolUse
 	var inputTokens, outputTokens int
 	var credits float64
+	var realInputTokens int
 
 	callback := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
@@ -1718,6 +1846,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 		OnError:    func(err error) { h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429")) },
 		OnCredits:  func(c float64) { credits = c },
+		OnContextUsage: func(pct float64) {
+			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+		},
 	}
 
 	err := CallKiroAPI(account, payload, callback)
@@ -1747,7 +1878,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		toolUses = append(toolUses, bracketCalls...)
 	}
 
-	if inputTokens <= 0 {
+	if realInputTokens > 0 {
+		inputTokens = realInputTokens
+	} else if inputTokens <= 0 {
 		inputTokens = estimatedInputTokens
 	}
 	outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
@@ -1880,6 +2013,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetEndpointConfig(w, r)
 	case path == "/endpoint" && r.Method == "POST":
 		h.apiUpdateEndpointConfig(w, r)
+	case path == "/proxy" && r.Method == "GET":
+		h.apiGetProxy(w, r)
+	case path == "/proxy" && r.Method == "POST":
+		h.apiUpdateProxy(w, r)
 	case path == "/version" && r.Method == "GET":
 		h.apiGetVersion(w, r)
 	case path == "/export" && r.Method == "POST":
@@ -1938,6 +2075,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"hasToken":          a.AccessToken != "",
 			"machineId":         a.MachineId,
 			"weight":            a.Weight,
+			"allowOverage":      a.AllowOverage,
+			"overageWeight":     a.OverageWeight,
 			"subscriptionType":  a.SubscriptionType,
 			"subscriptionTitle": a.SubscriptionTitle,
 			"daysRemaining":     a.DaysRemaining,
@@ -2031,6 +2170,12 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["weight"].(float64); ok {
 		existing.Weight = int(v)
+	}
+	if v, ok := updates["allowOverage"].(bool); ok {
+		existing.AllowOverage = v
+	}
+	if v, ok := updates["overageWeight"].(float64); ok {
+		existing.OverageWeight = clampInt(int(v), 1, 10)
 	}
 
 	if err := config.UpdateAccount(id, *existing); err != nil {
@@ -2502,6 +2647,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    expiresAt,
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
+		ProfileArn:   tempAccount.ProfileArn,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -2737,6 +2883,9 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"region":            account.Region,
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
+		"weight":            account.Weight,
+		"allowOverage":      account.AllowOverage,
+		"overageWeight":     account.OverageWeight,
 		"enabled":           account.Enabled,
 		"banStatus":         account.BanStatus,
 		"banReason":         account.BanReason,
@@ -2852,8 +3001,9 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 
 // apiGetEndpointConfig 获取端点配置
 func (h *Handler) apiGetEndpointConfig(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]string{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"preferredEndpoint": config.GetPreferredEndpoint(),
+		"endpointFallback":  config.GetEndpointFallback(),
 	})
 }
 
@@ -2861,6 +3011,7 @@ func (h *Handler) apiGetEndpointConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PreferredEndpoint string `json:"preferredEndpoint"`
+		EndpointFallback  *bool  `json:"endpointFallback"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -2868,10 +3019,10 @@ func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	valid := map[string]bool{"auto": true, "codewhisperer": true, "amazonq": true}
+	valid := map[string]bool{"auto": true, "kiro": true, "codewhisperer": true, "amazonq": true}
 	if !valid[req.PreferredEndpoint] {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid endpoint, must be: auto, codewhisperer, or amazonq"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid endpoint, must be: auto, kiro, codewhisperer, or amazonq"})
 		return
 	}
 
@@ -2880,6 +3031,58 @@ func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+
+	if req.EndpointFallback != nil {
+		config.UpdateEndpointFallback(*req.EndpointFallback)
+	}
+
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+// applyProxyConfig 将代理配置应用到所有出站 HTTP 客户端（Kiro API + auth 模块）
+func applyProxyConfig(proxyURL string) {
+	InitKiroHttpClient(proxyURL)
+	auth.InitHttpClient(proxyURL)
+}
+
+// apiGetProxy 获取当前代理配置
+func (h *Handler) apiGetProxy(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]string{
+		"proxyURL": config.GetProxyURL(),
+	})
+}
+
+// apiUpdateProxy 更新代理配置并立即生效
+func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProxyURL string `json:"proxyURL"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	// 验证代理 URL 格式（非空时）
+	if req.ProxyURL != "" {
+		if !strings.HasPrefix(req.ProxyURL, "http://") &&
+			!strings.HasPrefix(req.ProxyURL, "https://") &&
+			!strings.HasPrefix(req.ProxyURL, "socks5://") &&
+			!strings.HasPrefix(req.ProxyURL, "socks5h://") {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "proxyURL must start with http://, https://, socks5://, or socks5h://"})
+			return
+		}
+	}
+
+	if err := config.UpdateProxySettings(req.ProxyURL); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// 立即应用新的代理配置
+	applyProxyConfig(req.ProxyURL)
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
@@ -3057,7 +3260,7 @@ func (h *Handler) handleRefreshErr(account *config.Account, err error) error {
 		if h.pool != nil {
 			h.pool.Reload()
 		}
-		fmt.Printf("[Refresh] Account %s disabled (invalid_grant)\n", account.Email)
+		logger.Warnf("[Refresh] Account %s disabled (invalid_grant)", account.Email)
 	}
 	return err
 }
@@ -3238,4 +3441,14 @@ func (h *Handler) apiDeleteApiKey(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }

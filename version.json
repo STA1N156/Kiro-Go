@@ -1,5 +1,5 @@
 {
-  "version": "1.0.8",
-  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main（截至 acc5fe4）：prompt cache 追踪大幅改进\n✨ 上游新增：最小可缓存 token 阈值（普通1024/Opus4096）、隐式消息边界断点、缓存命中上限85%、billing-header 指纹归一化\n🆕 保留本地：claude-3-7-sonnet-20250219 映射、<thinking> 标签真实边界识别、[Called ...] 工具调用兜底解析\n🆕 保留本地：请求体 thinking 字段与 reasoning_effort 识别、动态 max_thinking_length\n🆕 保留本地：Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型、工具名 sha256 缩短\n🆕 保留本地：401/403 单次刷新重试、invalid_grant 立即禁用账号、profile_arn 动态注入",
+  "version": "1.0.9",
+  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main（截至 fdb0251）\n✨ 上游新增：outbound proxy（socks5/http）支持、cookie 导入登录、账号超额降频复用、logger 分级日志、contextUsageEvent 精准 input_tokens、Claude thinking 配置路由、prompt cache 指纹稳定化、Kiro profile ARN 自动解析\n🆕 保留本地：请求调用日志（环形缓冲 + 持久化 + 保留天数 + 分页 + 手动清除）、多 API Key 管理、admin 面板日志页面\n🆕 保留本地：claude-3-7-sonnet-20250219 映射、<thinking> 标签真实边界识别、[Called ...] 工具调用兜底解析、Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }

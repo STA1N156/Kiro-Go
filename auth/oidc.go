@@ -93,7 +93,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (Refr
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient.Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -135,7 +135,7 @@ func refreshSocialToken(refreshToken string) (RefreshResult, error) {
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient.Do(req)
+	resp, err := httpClient().Do(req)
 	if err != nil {
 		return RefreshResult{}, err
 	}

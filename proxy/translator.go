@@ -62,7 +62,8 @@ const (
 type ClaudeThinkingConfig struct {
 	Type         string `json:"type"`
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
-	Effort       string `json:"effort,omitempty"`
+	Effort       string `json:"effort,omitempty"`  // OpenAI reasoning_effort 兼容
+	Display      string `json:"display,omitempty"` // Anthropic display
 }
 
 // buildThinkingPrompt 根据 thinking 配置构造注入到 system prompt 的前缀。
@@ -180,6 +181,24 @@ func ResolveOpenAIThinking(req *OpenAIRequest, suffix string) (string, string) {
 	return mappedModel, ""
 }
 
+// resolveClaudeThinkingMode 是 handler/测试沿用的旧接口：只返回是否启用 thinking 的布尔结果。
+//
+// 与 ResolveClaudeThinking 的语义差异：本函数遵循 suffix 优先（即便请求体 disabled，
+// 也用 suffix 触发 thinking）；ResolveClaudeThinking 用于 system prompt 注入，
+// 因此 disabled 优先级更高。
+func resolveClaudeThinkingMode(model string, thinkingCfg *ClaudeThinkingConfig, thinkingSuffix string) (string, bool) {
+	actualModel, suffixThinking := ParseModelAndThinking(model, thinkingSuffix)
+	return actualModel, suffixThinking || isClaudeThinkingRequested(thinkingCfg)
+}
+
+func isClaudeThinkingRequested(thinkingCfg *ClaudeThinkingConfig) bool {
+	if thinkingCfg == nil {
+		return false
+	}
+	kind := strings.ToLower(strings.TrimSpace(thinkingCfg.Type))
+	return kind == "enabled" || kind == "adaptive"
+}
+
 func MapModel(model string) string {
 	mapped, _ := ParseModelAndThinking(model, "-thinking")
 	return mapped
@@ -206,9 +225,9 @@ type ClaudeRequest struct {
 	TopP        float64               `json:"top_p,omitempty"`
 	Stream      bool                  `json:"stream,omitempty"`
 	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
+	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"` // Anthropic extended thinking
 	Tools       []ClaudeTool          `json:"tools,omitempty"`
 	ToolChoice  interface{}           `json:"tool_choice,omitempty"`
-	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"` // Anthropic extended thinking
 }
 
 type ClaudeMessage struct {
@@ -220,6 +239,7 @@ type ClaudeContentBlock struct {
 	Type      string       `json:"type"`
 	Text      string       `json:"text,omitempty"`
 	Thinking  string       `json:"thinking,omitempty"`
+	Signature string       `json:"signature,omitempty"`
 	ID        string       `json:"id,omitempty"`
 	Name      string       `json:"name,omitempty"`
 	Input     interface{}  `json:"input,omitempty"`
@@ -272,6 +292,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinkingPrompt string) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
 
+	// 提取系统提示
 	// 提取系统提示
 	systemPrompt := extractSystemPrompt(req.System)
 
@@ -348,11 +369,14 @@ func ClaudeToKiro(req *ClaudeRequest, thinkingPrompt string) *KiroPayload {
 	}
 
 	// 转换工具
-	kiroTools := convertClaudeTools(req.Tools)
+	kiroTools, toolNameMap := convertClaudeTools(req.Tools)
 
 	// 构建 payload
 	payload := &KiroPayload{}
+	payload.ToolNameMap = toolNameMap
 	payload.ConversationState.ChatTriggerType = "MANUAL"
+	payload.ConversationState.AgentTaskType = "vibe"
+	payload.ConversationState.AgentContinuationId = uuid.New().String()
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstClaudeConversationAnchor(req.Messages))
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: finalContent,
@@ -381,6 +405,88 @@ func ClaudeToKiro(req *ClaudeRequest, thinkingPrompt string) *KiroPayload {
 	}
 
 	return payload
+}
+
+func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
+	systemPrompt := extractSystemPrompt(system)
+	if !thinking {
+		return systemPrompt
+	}
+	if systemPrompt == "" {
+		return ThinkingModePrompt
+	}
+	return ThinkingModePrompt + "\n\n" + systemPrompt
+}
+
+func cloneClaudeRequestForThinking(req *ClaudeRequest, thinking bool) *ClaudeRequest {
+	if req == nil {
+		return nil
+	}
+
+	cloned := *req
+	if thinking {
+		cloned.System = prependThinkingSystem(req.System)
+	}
+	return &cloned
+}
+
+func prependThinkingSystem(system interface{}) interface{} {
+	thinkingText := ThinkingModePrompt
+	if hasClaudeSystemContent(system) {
+		thinkingText += "\n"
+	}
+	thinkingBlock := map[string]interface{}{
+		"type": "text",
+		"text": thinkingText,
+	}
+
+	switch v := system.(type) {
+	case nil:
+		return []interface{}{thinkingBlock}
+	case string:
+		if v == "" {
+			return []interface{}{thinkingBlock}
+		}
+		return []interface{}{
+			thinkingBlock,
+			map[string]interface{}{
+				"type": "text",
+				"text": v,
+			},
+		}
+	case []interface{}:
+		blocks := make([]interface{}, 0, len(v)+1)
+		blocks = append(blocks, thinkingBlock)
+		blocks = append(blocks, v...)
+		return blocks
+	case []string:
+		blocks := make([]interface{}, 0, len(v)+1)
+		blocks = append(blocks, thinkingBlock)
+		for _, block := range v {
+			blocks = append(blocks, map[string]interface{}{
+				"type": "text",
+				"text": block,
+			})
+		}
+		return blocks
+	default:
+		return []interface{}{thinkingBlock}
+	}
+}
+
+func hasClaudeSystemContent(system interface{}) bool {
+	switch v := system.(type) {
+	case nil:
+		return false
+	case string:
+		return v != ""
+	case []interface{}:
+		return len(v) > 0
+	case []string:
+		return len(v) > 0
+	default:
+		return true
+	}
 }
 
 func extractSystemPrompt(system interface{}) string {
@@ -541,31 +647,126 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) 
 	return text, toolUses
 }
 
-func convertClaudeTools(tools []ClaudeTool) []KiroToolWrapper {
+func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]string) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	result := make([]KiroToolWrapper, len(tools))
-	for i, tool := range tools {
+	result := make([]KiroToolWrapper, 0, len(tools))
+	nameMap := make(map[string]string)
+	for _, tool := range tools {
 		desc := tool.Description
 		if len(desc) > maxToolDescLen {
 			desc = desc[:maxToolDescLen] + "..."
 		}
-		result[i] = KiroToolWrapper{}
-		result[i].ToolSpecification.Name = shortenToolNameWithMap(tool.Name)
-		result[i].ToolSpecification.Description = desc
-		result[i].ToolSpecification.InputSchema = InputSchema{JSON: tool.InputSchema}
+		// 先 sanitize 成 Kiro 接受的 camelCase，再用 sha256 缩短超长名（同时保存全局映射）
+		sanitized := shortenToolNameWithMap(sanitizeToolName(tool.Name))
+		if sanitized != tool.Name {
+			nameMap[sanitized] = tool.Name
+		}
+		w := KiroToolWrapper{}
+		w.ToolSpecification.Name = sanitized
+		w.ToolSpecification.Description = desc
+		w.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.InputSchema)}
+		result = append(result, w)
+	}
+	return result, nameMap
+}
+
+// ensureObjectSchema ensures the JSON schema has "type": "object" at the top level
+// and removes invalid null values from "required" fields (recursively).
+// Kiro API rejects tool schemas with "required": null.
+func ensureObjectSchema(schema interface{}) interface{} {
+	m, ok := schema.(map[string]interface{})
+	if !ok {
+		return map[string]interface{}{"type": "object"}
+	}
+	cleanSchema(m)
+	if _, hasType := m["type"]; !hasType {
+		m["type"] = "object"
+	}
+	return m
+}
+
+// cleanSchema recursively removes or fixes invalid "required": null entries
+// in a JSON Schema tree.
+func cleanSchema(m map[string]interface{}) {
+	// Fix "required" field: must be array or absent
+	if req, exists := m["required"]; exists {
+		if req == nil {
+			delete(m, "required")
+		} else if arr, ok := req.([]interface{}); ok && len(arr) == 0 {
+			delete(m, "required")
+		}
+	}
+
+	// Recurse into "properties"
+	if props, ok := m["properties"].(map[string]interface{}); ok {
+		for _, v := range props {
+			if sub, ok := v.(map[string]interface{}); ok {
+				cleanSchema(sub)
+			}
+		}
+	}
+
+	// Recurse into "items"
+	if items, ok := m["items"].(map[string]interface{}); ok {
+		cleanSchema(items)
+	}
+
+	// Recurse into nested object schemas (e.g., additionalProperties, allOf, oneOf, anyOf)
+	for _, key := range []string{"additionalProperties"} {
+		if sub, ok := m[key].(map[string]interface{}); ok {
+			cleanSchema(sub)
+		}
+	}
+	for _, key := range []string{"allOf", "oneOf", "anyOf"} {
+		if arr, ok := m[key].([]interface{}); ok {
+			for _, item := range arr {
+				if sub, ok := item.(map[string]interface{}); ok {
+					cleanSchema(sub)
+				}
+			}
+		}
+	}
+}
+
+// sanitizeToolName normalizes a tool name to characters the Kiro API accepts.
+// Kiro tool names must be pure camelCase (no underscores or dashes).
+// Separators (_, -, and multi-underscore namespace prefixes) are converted to camelCase boundaries.
+func sanitizeToolName(name string) string {
+	// Split on underscores and dashes, including multi-underscore namespace prefixes.
+	parts := strings.FieldsFunc(name, func(r rune) bool {
+		return r == '_' || r == '-'
+	})
+	if len(parts) == 0 {
+		return "tool"
+	}
+	// Build camelCase: first part lowercase start, rest capitalize first letter
+	var b strings.Builder
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		if i == 0 {
+			b.WriteString(strings.ToLower(part[:1]) + part[1:])
+		} else {
+			b.WriteString(strings.ToUpper(part[:1]) + part[1:])
+		}
+	}
+	result := b.String()
+	if result == "" {
+		return "tool"
 	}
 	return result
 }
 
 // ==================== Kiro -> Claude 转换 ====================
 
-func KiroToClaudeResponse(content, thinkingContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
+func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
 	blocks := make([]ClaudeContentBlock, 0)
 
-	if thinkingContent != "" {
+	if thinkingContent != "" || includeEmptyThinkingBlock {
 		blocks = append(blocks, ClaudeContentBlock{
 			Type:     "thinking",
 			Thinking: thinkingContent,

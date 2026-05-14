@@ -1,5 +1,5 @@
-// Package proxy Kiro API 代理核心
-// 负责调用 Kiro API 并解析 AWS Event Stream 响应
+// Package proxy is the core proxy layer for the Kiro API.
+// It handles streaming API calls to the Kiro backend and parses AWS Event Stream responses.
 package proxy
 
 import (
@@ -9,16 +9,18 @@ import (
 	"io"
 	"kiro-go/auth"
 	"kiro-go/config"
+	"kiro-go/logger"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-// 双端点配置（429 时自动 fallback）
+// Endpoint configuration (auto-fallback on quota exhaustion).
 type kiroEndpoint struct {
 	URL       string
 	Origin    string
@@ -28,6 +30,12 @@ type kiroEndpoint struct {
 
 var kiroEndpoints = []kiroEndpoint{
 	{
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "",
+		Name:      "Kiro IDE",
+	},
+	{
 		URL:       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
 		Origin:    "AI_EDITOR",
 		AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
@@ -35,38 +43,78 @@ var kiroEndpoints = []kiroEndpoint{
 	},
 	{
 		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "CLI",
+		Origin:    "AI_EDITOR",
 		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
 		Name:      "AmazonQ",
 	},
 }
 
-// 全局 HTTP 客户端，复用连接池
-var kiroHttpClient = &http.Client{
-	Timeout: 5 * time.Minute,
-	Transport: &http.Transport{
-		MaxIdleConns:        100,              // 最大空闲连接数
-		MaxIdleConnsPerHost: 20,               // 每个 Host 最大空闲连接数
-		IdleConnTimeout:     90 * time.Second, // 空闲连接超时
-		DisableCompression:  false,            // 启用压缩
-		ForceAttemptHTTP2:   true,             // 尝试使用 HTTP/2
-	},
+// Global HTTP clients, swappable at runtime to apply proxy reconfiguration without restart.
+var kiroHttpStore atomic.Pointer[http.Client]
+var kiroRestHttpStore atomic.Pointer[http.Client]
+
+func init() {
+	InitKiroHttpClient("")
 }
 
-// ==================== 请求结构 ====================
+// buildKiroTransport constructs an HTTP Transport with optional outbound proxy support.
+func buildKiroTransport(proxyURL string) *http.Transport {
+	t := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  false,
+		ForceAttemptHTTP2:   true,
+	}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			t.Proxy = http.ProxyURL(u)
+			// Proxied connections cannot negotiate HTTP/2.
+			t.ForceAttemptHTTP2 = false
+		}
+	} else {
+		t.Proxy = http.ProxyFromEnvironment
+	}
+	return t
+}
 
-// KiroPayload Kiro API 请求体
+// InitKiroHttpClient initializes (or reinitializes) the HTTP clients used for Kiro API requests.
+func InitKiroHttpClient(proxyURL string) {
+	client := &http.Client{
+		Timeout:   5 * time.Minute,
+		Transport: buildKiroTransport(proxyURL),
+	}
+	kiroHttpStore.Store(client)
+
+	restClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: buildKiroTransport(proxyURL),
+	}
+	kiroRestHttpStore.Store(restClient)
+}
+
+// ==================== Request Structs ====================
+
+// KiroPayload is the top-level request body sent to the Kiro API.
 type KiroPayload struct {
 	ConversationState struct {
-		ChatTriggerType string `json:"chatTriggerType"`
-		ConversationID  string `json:"conversationId"`
-		CurrentMessage  struct {
+		AgentContinuationId string `json:"agentContinuationId,omitempty"`
+		AgentTaskType       string `json:"agentTaskType,omitempty"`
+		ChatTriggerType     string `json:"chatTriggerType"`
+		ConversationID      string `json:"conversationId"`
+		CurrentMessage      struct {
 			UserInputMessage KiroUserInputMessage `json:"userInputMessage"`
 		} `json:"currentMessage"`
 		History []KiroHistoryMessage `json:"history,omitempty"`
 	} `json:"conversationState"`
 	ProfileArn      string           `json:"profileArn,omitempty"`
 	InferenceConfig *InferenceConfig `json:"inferenceConfig,omitempty"`
+
+	// ToolNameMap maps sanitized tool names (sent to Kiro) back to the
+	// original names supplied by the client. Used to restore original names
+	// in tool_use responses so the client can match them to its tool registry.
+	// Not serialized to the Kiro API request body.
+	ToolNameMap map[string]string `json:"-"`
 }
 
 type KiroUserInputMessage struct {
@@ -133,48 +181,101 @@ type InferenceConfig struct {
 	TopP        float64 `json:"topP,omitempty"`
 }
 
-// ==================== 流式回调 ====================
+// ==================== Stream Callbacks ====================
 
-// KiroStreamCallback 流式响应回调
+// KiroStreamCallback stream response callbacks
 type KiroStreamCallback struct {
-	OnText     func(text string, isThinking bool)
-	OnToolUse  func(toolUse KiroToolUse)
-	OnComplete func(inputTokens, outputTokens int)
-	OnError    func(err error)
-	OnCredits  func(credits float64)
+	OnText         func(text string, isThinking bool)
+	OnToolUse      func(toolUse KiroToolUse)
+	OnComplete     func(inputTokens, outputTokens int)
+	OnError        func(err error)
+	OnCredits      func(credits float64)
+	OnContextUsage func(percentage float64)
 }
 
-// ==================== API 调用 ====================
+// ==================== API Call ====================
 
-// getSortedEndpoints 根据首选端点配置排序端点列表
+// getSortedEndpoints returns endpoints ordered by user preference, with optional fallback.
 func getSortedEndpoints(preferred string) []kiroEndpoint {
-	if preferred == "amazonq" {
-		return []kiroEndpoint{kiroEndpoints[1], kiroEndpoints[0]}
+	fallback := config.GetEndpointFallback()
+
+	var primary int
+	switch preferred {
+	case "kiro":
+		primary = 0
+	case "codewhisperer":
+		primary = 1
+	case "amazonq":
+		primary = 2
+	default:
+		// "auto": Kiro first, then fallback to others
+		return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1], kiroEndpoints[2]}
 	}
-	if preferred == "codewhisperer" {
-		return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
+
+	if !fallback {
+		// No fallback: only use the selected endpoint
+		return []kiroEndpoint{kiroEndpoints[primary]}
 	}
-	// "auto" 或空值：默认顺序
-	return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1]}
+
+	// With fallback: selected first, then others in order
+	result := []kiroEndpoint{kiroEndpoints[primary]}
+	for i, ep := range kiroEndpoints {
+		if i != primary {
+			result = append(result, ep)
+		}
+	}
+	return result
 }
 
-// CallKiroAPI 调用 Kiro API（流式），双端点自动 fallback
+// CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	if _, err := json.Marshal(payload); err != nil {
 		return err
 	}
 
-	// 由 provider 动态注入 profileArn：始终以当前凭据为准，避免凭据切换/刷新后
-	// 仍带着旧 ARN。
-	payload.ProfileArn = account.ProfileArn
+	// Debug: dump full payload for troubleshooting upstream rejections
+	if payloadJSON, err := json.Marshal(payload); err == nil {
+		logger.Debugf("[KiroAPI] Request payload: %s", string(payloadJSON))
+	}
 
-	// 根据配置排序端点
+	// Wrap OnToolUse to restore original tool names for the client.
+	if callback != nil && callback.OnToolUse != nil && len(payload.ToolNameMap) > 0 {
+		originalOnToolUse := callback.OnToolUse
+		nameMap := payload.ToolNameMap
+		wrapped := *callback
+		wrapped.OnToolUse = func(tu KiroToolUse) {
+			if original, ok := nameMap[tu.Name]; ok {
+				tu.Name = original
+			}
+			originalOnToolUse(tu)
+		}
+		callback = &wrapped
+	}
+
+	// 由 provider 动态注入 profileArn：始终以当前凭据为准，避免凭据切换/刷新后
+	// 仍带着旧 ARN；当账号本身缺 ARN 时再尝试用 ResolveProfileArn 兜底。
+	if account != nil && account.ProfileArn != "" {
+		payload.ProfileArn = account.ProfileArn
+	}
+	if payload != nil && strings.TrimSpace(payload.ProfileArn) == "" {
+		if profileArn, err := ResolveProfileArn(account); err == nil {
+			payload.ProfileArn = profileArn
+		} else {
+			accountEmail := "<nil>"
+			if account != nil {
+				accountEmail = account.Email
+			}
+			logger.Warnf("[ProfileArn] Failed to resolve profile ARN for %s: %v", accountEmail, err)
+		}
+	}
+
+	// Build endpoint list ordered by configuration.
 	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
 
 	var lastErr error
 	var refreshed bool // 单请求生命周期内最多自动刷新一次 token
 	for _, ep := range endpoints {
-		// 更新 payload 中的 origin
+		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
 		reqBody, _ := json.Marshal(payload)
@@ -192,7 +293,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "*/*")
-		req.Header.Set("X-Amz-Target", ep.AmzTarget)
+		if ep.AmzTarget != "" {
+			req.Header.Set("X-Amz-Target", ep.AmzTarget)
+		}
 		applyKiroBaseHeaders(req, account, headerValues)
 		req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 		req.Header.Set("x-amzn-codewhisperer-optout", "true")
@@ -202,16 +305,16 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			req.Header.Set("tokentype", "API_KEY")
 		}
 
-		resp, err := kiroHttpClient.Do(req)
+		resp, err := kiroHttpStore.Load().Do(req)
 		if err != nil {
 			lastErr = err
-			fmt.Printf("[KiroAPI] Endpoint %s failed: %v\n", ep.Name, err)
+			logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
 			continue
 		}
 
 		if resp.StatusCode == 429 {
 			resp.Body.Close()
-			fmt.Printf("[KiroAPI] Endpoint %s quota exhausted (429), trying next...\n", ep.Name)
+			logger.Warnf("[KiroAPI] Endpoint %s quota exhausted (429), trying next...", ep.Name)
 			lastErr = fmt.Errorf("quota exhausted on %s", ep.Name)
 			continue
 		}
@@ -235,14 +338,16 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 						payload.ProfileArn = res.ProfileArn
 					}
 					config.UpdateAccountTokenFull(account.ID, res.AccessToken, res.RefreshToken, res.ExpiresAt, res.ProfileArn)
-					fmt.Printf("[KiroAPI] %d on %s: refreshed token, retrying\n", resp.StatusCode, ep.Name)
+					logger.Warnf("[KiroAPI] %d on %s: refreshed token, retrying", resp.StatusCode, ep.Name)
 					// 在当前端点立即重试一次
 					reqBody2, _ := json.Marshal(payload)
 					req2, _ := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody2))
 					headerValues2 := buildStreamingHeaderValues(account, host)
 					req2.Header.Set("Content-Type", "application/json")
 					req2.Header.Set("Accept", "*/*")
-					req2.Header.Set("X-Amz-Target", ep.AmzTarget)
+					if ep.AmzTarget != "" {
+						req2.Header.Set("X-Amz-Target", ep.AmzTarget)
+					}
 					applyKiroBaseHeaders(req2, account, headerValues2)
 					req2.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 					req2.Header.Set("x-amzn-codewhisperer-optout", "true")
@@ -251,7 +356,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 					if account.AuthMethod == "api_key" {
 						req2.Header.Set("tokentype", "API_KEY")
 					}
-					resp2, err2 := kiroHttpClient.Do(req2)
+					resp2, err2 := kiroHttpStore.Load().Do(req2)
 					if err2 == nil {
 						if resp2.StatusCode == 200 {
 							err := parseEventStream(resp2.Body, callback)
@@ -264,10 +369,11 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 					}
 				}
 			}
+			// Authentication errors are not retried across endpoints.
 			if resp.StatusCode == 401 || resp.StatusCode == 403 {
 				return lastErr
 			}
-			fmt.Printf("[KiroAPI] Endpoint %s error: %v\n", ep.Name, lastErr)
+			logger.Warnf("[KiroAPI] Endpoint %s error: %v", ep.Name, lastErr)
 			continue
 		}
 
@@ -282,11 +388,11 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	return fmt.Errorf("all endpoints failed")
 }
 
-// ==================== Event Stream 解析 ====================
+// ==================== Event Stream Parsing ====================
 
-// parseEventStream 解析 AWS Event Stream 二进制格式
+// parseEventStream decodes an AWS binary Event Stream response body.
 func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
-	// 不使用 bufio，直接读取避免缓冲延迟
+	// Read directly without bufio to avoid buffering latency in streaming responses.
 	var inputTokens, outputTokens int
 	var totalCredits float64
 	var currentToolUse *toolUseState
@@ -311,7 +417,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			continue
 		}
 
-		// 读取剩余部分
+		// Read the remaining message bytes.
 		remaining := totalLength - 12
 		msgBuf := make([]byte, remaining)
 		_, err = io.ReadFull(body, msgBuf)
@@ -336,7 +442,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
 
-		// 处理事件
+		// Dispatch by event type.
 		switch eventType {
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
@@ -357,6 +463,12 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		case "meteringEvent":
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
+			}
+		case "contextUsageEvent":
+			if pct, ok := event["contextUsagePercentage"].(float64); ok {
+				if callback.OnContextUsage != nil {
+					callback.OnContextUsage(pct)
+				}
 			}
 		}
 	}
@@ -420,6 +532,17 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 	}
 
 	return inputTokens, outputTokens
+}
+
+// getContextWindowSize returns the context window size (in tokens) for a model.
+func getContextWindowSize(model string) int {
+	m := strings.ToLower(model)
+	// sonnet-4.6, opus-4.6, opus-4.7 all have 1M context windows
+	if strings.Contains(m, "4.6") || strings.Contains(m, "4-6") ||
+		strings.Contains(m, "4.7") || strings.Contains(m, "4-7") {
+		return 1_000_000
+	}
+	return 200_000
 }
 
 func collectUsageMaps(v interface{}, out *[]map[string]interface{}) {
@@ -515,7 +638,7 @@ func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 	return 0, false
 }
 
-// ==================== Tool Use 处理 ====================
+// ==================== Tool Use Handling ====================
 
 type toolUseState struct {
 	ToolUseID   string
@@ -570,7 +693,7 @@ func finishToolUse(state *toolUseState, callback *KiroStreamCallback) {
 	})
 }
 
-// extractEventType 从 headers 中提取事件类型
+// extractEventType extracts the event type string from AWS Event Stream message headers.
 func extractEventType(headers []byte) string {
 	offset := 0
 	for offset < len(headers) {
@@ -607,7 +730,7 @@ func extractEventType(headers []byte) string {
 			continue
 		}
 
-		// 跳过其他类型
+		// Skip other value types by their fixed byte widths.
 		skipSizes := map[byte]int{0: 0, 1: 0, 2: 1, 3: 2, 4: 4, 5: 8, 8: 8, 9: 16}
 		if valueType == 6 {
 			if offset+2 > len(headers) {

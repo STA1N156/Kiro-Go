@@ -51,10 +51,14 @@ type Account struct {
 	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
 	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
-	ProfileArn   string `json:"profileArn,omitempty"`   // AWS profile ARN (从 token 刷新响应中提取，由 provider 注入到 Kiro 请求体)
+	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN（从 token 刷新响应中提取，由 provider 注入到 Kiro 请求体）
 
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
+
+	// Overage behavior after the main usage limit is reached.
+	AllowOverage  bool `json:"allowOverage,omitempty"`  // Whether to keep using the account after UsageLimit is reached
+	OverageWeight int  `json:"overageWeight,omitempty"` // 1-10, lower values reduce overage request frequency
 
 	// Account status
 	Enabled   bool   `json:"enabled"`             // Whether account is active in the pool
@@ -117,8 +121,23 @@ type Config struct {
 	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
 	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
 
-	// Endpoint configuration: "auto", "codewhisperer", or "amazonq"
+	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
+
+	// EndpointFallback controls whether to try other endpoints when the preferred one fails.
+	// Defaults to true. Set to false to only use the preferred endpoint.
+	EndpointFallback *bool `json:"endpointFallback,omitempty"`
+
+	// Proxy configuration: optional outbound proxy for Kiro API requests
+	// Format: "socks5://host:port", "socks5://user:pass@host:port",
+	//         "http://host:port",  "http://user:pass@host:port"
+	// Leave empty to connect directly.
+	ProxyURL string `json:"proxyURL,omitempty"`
+
+	// LogLevel controls verbosity of application logs.
+	// Accepted values: "debug", "info", "warn", "error". Defaults to "info".
+	// Can be overridden by the LOG_LEVEL environment variable.
+	LogLevel string `json:"logLevel,omitempty"`
 
 	// Log retention: 7, 14, or 30 days (0 = 7 days default)
 	LogRetentionDays int `json:"logRetentionDays,omitempty"`
@@ -152,7 +171,7 @@ type AccountInfo struct {
 }
 
 // Version 当前版本号
-const Version = "1.0.8"
+const Version = "1.0.9"
 
 var (
 	cfg     *Config
@@ -278,6 +297,18 @@ func UpdateAccount(id string, account Account) error {
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
 			cfg.Accounts[i] = account
+			return Save()
+		}
+	}
+	return nil
+}
+
+func UpdateAccountProfileArn(id, profileArn string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].ProfileArn = profileArn
 			return Save()
 		}
 	}
@@ -609,6 +640,57 @@ func DisableAccount(id, reason string) error {
 		}
 	}
 	return nil
+}
+
+// GetEndpointFallback returns whether endpoint fallback is enabled. Defaults to true.
+func GetEndpointFallback() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg.EndpointFallback == nil {
+		return true
+	}
+	return *cfg.EndpointFallback
+}
+
+// UpdateEndpointFallback sets the endpoint fallback switch and persists the change.
+func UpdateEndpointFallback(enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.EndpointFallback = &enabled
+	return Save()
+}
+
+// GetProxyURL 获取出站代理地址
+func GetProxyURL() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	return cfg.ProxyURL
+}
+
+// UpdateProxySettings 更新出站代理配置
+func UpdateProxySettings(proxyURL string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ProxyURL = proxyURL
+	return Save()
+}
+
+// GetLogLevel returns the configured log level (debug/info/warn/error). Defaults to "info".
+func GetLogLevel() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.LogLevel == "" {
+		return "info"
+	}
+	return cfg.LogLevel
+}
+
+// UpdateLogLevel updates the log level setting and persists the change.
+func UpdateLogLevel(level string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.LogLevel = level
+	return Save()
 }
 
 // KiroClientConfig 存放 Kiro 客户端请求头所需的版本信息。
