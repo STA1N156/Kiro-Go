@@ -929,6 +929,7 @@
                             </label>
                         </div>
                         <button class="btn btn-secondary btn-sm" onclick="showExportModal()" data-i18n="accounts.export"></button>
+                        <button class="btn btn-secondary btn-sm" onclick="refreshAllModels()" data-i18n="models.refreshAll"></button>
                         <button class="btn btn-primary btn-sm" onclick="showModal('add')" data-i18n="accounts.add"></button>
                     </div>
                 </div>
@@ -940,6 +941,7 @@
                         <button class="btn btn-sm btn-primary" onclick="batchAction('enable')" style="padding:3px 10px;font-size:12px" data-i18n="batch.enable"></button>
                         <button class="btn btn-sm btn-secondary" onclick="batchAction('disable')" style="padding:3px 10px;font-size:12px" data-i18n="batch.disable"></button>
                         <button class="btn btn-sm btn-secondary" onclick="batchAction('refresh')" style="padding:3px 10px;font-size:12px" data-i18n="batch.refresh"></button>
+                        <button class="btn btn-sm btn-secondary" onclick="batchRefreshModels()" style="padding:3px 10px;font-size:12px" data-i18n="batch.refreshModels"></button>
                         <div style="height:16px;width:1px;background:#e2e8f0;flex-shrink:0"></div>
                     </div>
                     <div style="display:flex;gap:6px;align-items:center;margin-left:auto;flex-shrink:0">
@@ -1117,6 +1119,8 @@
                 'accounts.add': '添加账号',
                 'accounts.empty': '暂无账号',
                 'accounts.refresh': '刷新',
+                'accounts.test': '测试',
+                'accounts.testing': '测试中...',
                 'accounts.detail': '详情',
                 'accounts.enable': '启用',
                 'accounts.disable': '禁用',
@@ -1141,6 +1145,9 @@
                 'accounts.trialToday': '今天到期',
                 'accounts.copyJSON': '复制 JSON',
                 'accounts.copyJSONSuccess': 'JSON 已复制到剪贴板',
+                'accounts.testModelPrompt': '输入测试模型',
+                'accounts.testSuccess': '测试成功',
+                'accounts.testFailed': '测试失败',
                 'accounts.overageOn': '超限已开',
                 'accounts.overageOff': '标记超限',
                 'accounts.overageBadge': '超限',
@@ -1215,6 +1222,7 @@
                 'detail.totalCredits': '总Credits',
                 'detail.models': '可用模型',
                 'detail.loadModels': '加载',
+                'detail.refreshModelCache': '刷新模型缓存',
                 'detail.loading': '加载中...',
                 'detail.noModels': '无可用模型',
                 'detail.loadFailed': '加载失败',
@@ -1322,12 +1330,15 @@
                 'batch.enable': '批量启用',
                 'batch.disable': '批量禁用',
                 'batch.refresh': '批量刷新',
+                'batch.refreshModels': '刷新模型缓存',
                 'batch.selected': '已选 {0} 个',
                 'batch.selectAll': '全选',
                 'batch.confirmEnable': '确定批量启用 {0} 个账号？',
                 'batch.confirmDisable': '确定批量禁用 {0} 个账号？',
                 'batch.confirmRefresh': '确定批量刷新 {0} 个账号？',
                 'batch.refreshResult': '刷新完成：成功 {0}，失败 {1}',
+                'batch.confirmRefreshModels': '刷新选中 {0} 个账号的模型缓存？',
+                'batch.refreshModelsResult': '模型缓存刷新完成：成功 {0}，失败 {1}',
                 'batch.done': '操作完成',
                 'filter.search': '搜索邮箱/昵称...',
                 'filter.all': '全部',
@@ -1336,7 +1347,10 @@
                 'filter.banned': '已封禁',
                 'accounts.weight': '权重',
                 'detail.weight': '请求权重',
-                'detail.weightHint': '0-1=普通, 2+=高优先级'
+                'detail.weightHint': '0-1=普通, 2+=高优先级',
+                'models.refreshAll': '刷新全部模型',
+                'models.confirmRefreshAll': '刷新所有已启用账号的模型缓存？',
+                'models.refreshAllDone': '模型缓存已刷新，当前聚合 {0} 个模型'
             },
             en: {
                 'login.subtitle': 'Enter admin password to login',
@@ -1357,6 +1371,8 @@
                 'accounts.add': 'Add Account',
                 'accounts.empty': 'No accounts',
                 'accounts.refresh': 'Refresh',
+                'accounts.test': 'Test',
+                'accounts.testing': 'Testing...',
                 'accounts.detail': 'Details',
                 'accounts.enable': 'Enable',
                 'accounts.disable': 'Disable',
@@ -1376,6 +1392,9 @@
                 'accounts.confirmDelete': 'Confirm delete?',
                 'accounts.copyJSON': 'Copy JSON',
                 'accounts.copyJSONSuccess': 'JSON copied to clipboard',
+                'accounts.testModelPrompt': 'Enter test model',
+                'accounts.testSuccess': 'Test success',
+                'accounts.testFailed': 'Test failed',
                 'accounts.overageOn': 'Overage on',
                 'accounts.overageOff': 'Mark overage',
                 'accounts.overageBadge': 'Overage',
@@ -1445,6 +1464,7 @@
                 'detail.totalCredits': 'Total Credits',
                 'detail.models': 'Available Models',
                 'detail.loadModels': 'Load',
+                'detail.refreshModelCache': 'Refresh Model Cache',
                 'detail.loading': 'Loading...',
                 'detail.noModels': 'No models available',
                 'detail.loadFailed': 'Load failed',
@@ -1552,12 +1572,15 @@
                 'batch.enable': 'Batch Enable',
                 'batch.disable': 'Batch Disable',
                 'batch.refresh': 'Batch Refresh',
+                'batch.refreshModels': 'Refresh Models',
                 'batch.selected': '{0} selected',
                 'batch.selectAll': 'Select All',
                 'batch.confirmEnable': 'Enable {0} accounts?',
                 'batch.confirmDisable': 'Disable {0} accounts?',
                 'batch.confirmRefresh': 'Refresh {0} accounts?',
                 'batch.refreshResult': 'Refresh done: {0} success, {1} failed',
+                'batch.confirmRefreshModels': 'Refresh model cache for {0} selected accounts?',
+                'batch.refreshModelsResult': 'Model cache refresh done: {0} success, {1} failed',
                 'batch.done': 'Done',
                 'filter.search': 'Search email/nickname...',
                 'filter.all': 'All',
@@ -1566,7 +1589,10 @@
                 'filter.banned': 'Banned',
                 'accounts.weight': 'Weight',
                 'detail.weight': 'Request Weight',
-                'detail.weightHint': '0-1=normal, 2+=higher priority'
+                'detail.weightHint': '0-1=normal, 2+=higher priority',
+                'models.refreshAll': 'Refresh All Models',
+                'models.confirmRefreshAll': 'Refresh model cache for all enabled accounts?',
+                'models.refreshAllDone': 'Model cache refreshed, {0} models aggregated'
             }
         };
         let currentLang = localStorage.getItem('kiro_lang') || 'zh';
@@ -1816,6 +1842,25 @@
                 alert(t('common.failed'));
             }
         }
+        async function batchRefreshModels() {
+            const ids = Array.from(selectedAccounts);
+            if (ids.length === 0) return;
+            if (!confirm(t('batch.confirmRefreshModels', ids.length))) return;
+            let success = 0, failed = 0;
+            for (const id of ids) {
+                try {
+                    const res = await fetch('/admin/api/accounts/' + id + '/models/refresh', {
+                        method: 'POST',
+                        headers: { 'X-Admin-Password': password }
+                    });
+                    const d = await res.json();
+                    if (d.success) success++; else failed++;
+                } catch (e) { failed++; }
+            }
+            alert(t('batch.refreshModelsResult', success, failed));
+            selectedAccounts.clear();
+            updateBatchBar();
+        }
         function renderAccounts() {
             const container = document.getElementById('accountsList');
             if (!container) return;
@@ -1850,6 +1895,7 @@
                     '</div>' +
                     '<div class="account-actions">' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="refreshAccount(\'' + a.id + '\')" title="' + t('accounts.refresh') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg></button>' +
+                    '<button id="test-' + a.id + '" class="btn btn-sm btn-primary" onclick="testAccount(\'' + a.id + '\')">' + t('accounts.test') + '</button>' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="showDetail(\'' + a.id + '\')" title="' + t('accounts.detail') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>' +
                     '<button class="btn btn-sm btn-icon btn-secondary" onclick="copyAccountJSON(\'' + a.id + '\', this)" title="' + t('accounts.copyJSON') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>' +
                     '<button class="btn btn-sm ' + (a.overageEnabled ? 'btn-success' : 'btn-secondary') + '" onclick="toggleOverage(\'' + a.id + '\',' + !a.overageEnabled + ')">' + (a.overageEnabled ? t('accounts.overageOn') : t('accounts.overageOff')) + '</button>' +
@@ -2000,7 +2046,7 @@
                 '<div class="detail-item"><div class="detail-label">' + t('detail.totalTokens') + '</div><div class="detail-value">' + formatNum(a.totalTokens || 0) + '</div></div>' +
                 '<div class="detail-item"><div class="detail-label">' + t('detail.totalCredits') + '</div><div class="detail-value">' + (a.totalCredits || 0).toFixed(2) + '</div></div>' +
                 '</div></div>' +
-                '<div class="detail-section"><h4>' + t('detail.models') + ' <button class="btn btn-sm btn-secondary" onclick="loadModels(\'' + id + '\')" style="margin-left:8px">' + t('detail.loadModels') + '</button></h4><div id="modelsList" class="model-list"></div></div>';
+                '<div class="detail-section"><h4>' + t('detail.models') + ' <button class="btn btn-sm btn-secondary" onclick="loadModels(\'' + id + '\')" style="margin-left:8px">' + t('detail.loadModels') + '</button> <button class="btn btn-sm btn-secondary" onclick="refreshAccountModels(\'' + id + '\')" style="margin-left:4px">' + t('detail.refreshModelCache') + '</button></h4><div id="modelsList" class="model-list"></div></div>';
             document.getElementById('detailModal').classList.add('active');
         }
         async function loadModels(id) {
@@ -2029,6 +2075,53 @@
                     container.innerHTML = '<p style="color:#ef4444">' + t('detail.loadFailed') + ': ' + (d.error || '') + '</p>';
                 }
             } catch (e) { container.innerHTML = '<p style="color:#ef4444">' + t('detail.loadFailed') + '</p>'; }
+        }
+        async function refreshAccountModels(id) {
+            try {
+                const res = await fetch('/admin/api/accounts/' + id + '/models/refresh', {
+                    method: 'POST',
+                    headers: { 'X-Admin-Password': password }
+                });
+                const d = await res.json();
+                if (d.success) {
+                    alert(t('detail.refreshModelCache') + ' OK (' + (d.count || 0) + ')');
+                    loadModels(id);
+                } else {
+                    alert(t('common.failed') + ': ' + (d.error || ''));
+                }
+            } catch (e) { alert(t('common.failed')); }
+        }
+        async function refreshAllModels() {
+            if (!confirm(t('models.confirmRefreshAll'))) return;
+            try {
+                const res = await fetch('/admin/api/accounts/models/refresh', {
+                    method: 'POST',
+                    headers: { 'X-Admin-Password': password }
+                });
+                const d = await res.json();
+                if (d.success) alert(t('models.refreshAllDone', d.refreshed || 0));
+                else alert(t('common.failed') + ': ' + (d.error || ''));
+            } catch (e) { alert(t('common.failed')); }
+        }
+        async function testAccount(id) {
+            const btn = document.getElementById('test-' + id);
+            const original = btn ? btn.textContent : '';
+            const model = prompt(t('accounts.testModelPrompt'), 'claude-sonnet-4') || 'claude-sonnet-4';
+            if (btn) { btn.textContent = t('accounts.testing'); btn.disabled = true; }
+            try {
+                const res = await fetch('/admin/api/accounts/' + id + '/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                    body: JSON.stringify({ model })
+                });
+                const d = await res.json();
+                if (d.success) alert(t('accounts.testSuccess') + ': ' + (d.reply || 'OK'));
+                else alert(t('accounts.testFailed') + ': ' + (d.error || 'unknown'));
+            } catch (e) {
+                alert(t('accounts.testFailed') + ': ' + e.message);
+            } finally {
+                if (btn) { btn.textContent = original; btn.disabled = false; }
+            }
         }
         function closeDetailModal() { document.getElementById('detailModal').classList.remove('active'); }
         async function generateMachineId() {

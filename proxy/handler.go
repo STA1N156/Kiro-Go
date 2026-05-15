@@ -17,6 +17,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const tokenRefreshSkewSeconds int64 = 120
+
 // Handler HTTP 处理器
 type Handler struct {
 	pool *pool.AccountPool
@@ -35,6 +37,7 @@ type Handler struct {
 	modelsCacheMu   sync.RWMutex
 	modelsCacheTime int64
 	promptCache     *promptCacheTracker
+	tokenRefreshMu  sync.Mutex
 }
 
 type thinkingStreamSource int
@@ -260,7 +263,7 @@ func (h *Handler) refreshAllAccounts() {
 		}
 
 		// 检查 token 是否需要刷新
-		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-300 {
+		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
 			res, err := auth.RefreshToken(account)
 			if err != nil {
 				h.handleRefreshErr(account, err)
@@ -557,6 +560,11 @@ func (h *Handler) refreshModelsCache() {
 			fmt.Printf("[ModelsCache] Failed to refresh for %s: %v\n", account.Email, err)
 			continue
 		}
+		modelIDs := make([]string, 0, len(models))
+		for _, m := range models {
+			modelIDs = append(modelIDs, m.ModelId)
+		}
+		h.pool.SetModelList(account.ID, modelIDs)
 		aggregated = mergeUniqueModels(aggregated, models)
 	}
 
@@ -567,6 +575,73 @@ func (h *Handler) refreshModelsCache() {
 		h.modelsCacheMu.Unlock()
 		fmt.Printf("[ModelsCache] Cached %d models\n", len(aggregated))
 	}
+}
+
+// fetchAndCacheAccountModels 拉取单个账号的模型列表，并写入路由缓存。
+func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
+	if err := h.ensureValidToken(account); err != nil {
+		return fmt.Errorf("token refresh failed: %w", err)
+	}
+	models, err := ListAvailableModels(account)
+	if err != nil {
+		return err
+	}
+	modelIDs := make([]string, 0, len(models))
+	for _, m := range models {
+		modelIDs = append(modelIDs, m.ModelId)
+	}
+	h.pool.SetModelList(account.ID, modelIDs)
+
+	h.modelsCacheMu.Lock()
+	h.cachedModels = mergeUniqueModels(h.cachedModels, models)
+	h.modelsCacheTime = time.Now().Unix()
+	h.modelsCacheMu.Unlock()
+
+	fmt.Printf("[ModelsCache] Refreshed %d models for account %s\n", len(models), account.Email)
+	return nil
+}
+
+func (h *Handler) apiRefreshAccountModels(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if latest := h.pool.GetByID(id); latest != nil {
+		account.AccessToken = latest.AccessToken
+		account.RefreshToken = latest.RefreshToken
+		account.ExpiresAt = latest.ExpiresAt
+		account.ProfileArn = latest.ProfileArn
+	}
+	if err := h.fetchAndCacheAccountModels(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"count":   len(h.pool.GetModelList(id)),
+	})
+}
+
+func (h *Handler) apiRefreshAllAccountsModels(w http.ResponseWriter, r *http.Request) {
+	h.refreshModelsCache()
+	h.modelsCacheMu.RLock()
+	cachedLen := len(h.cachedModels)
+	h.modelsCacheMu.RUnlock()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"refreshed": cachedLen,
+		"failed":    0,
+	})
 }
 
 func mergeUniqueModels(existing []ModelInfo, incoming []ModelInfo) []ModelInfo {
@@ -704,8 +779,14 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 获取账号
-	account := h.pool.GetNext()
+	// 解析模型和 thinking 模式：综合考量请求体 thinking 字段与模型名后缀
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinkingPrompt := ResolveClaudeThinking(&req, thinkingCfg.Suffix)
+	req.Model = actualModel
+	thinking := thinkingPrompt != ""
+
+	// 获取支持该模型的账号
+	account := h.pool.GetNextForModel(actualModel)
 	if account == nil {
 		h.sendClaudeError(w, 503, "api_error", "No available accounts")
 		return
@@ -717,11 +798,6 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 解析模型和 thinking 模式：综合考量请求体 thinking 字段与模型名后缀
-	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinkingPrompt := ResolveClaudeThinking(&req, thinkingCfg.Suffix)
-	req.Model = actualModel
-	thinking := thinkingPrompt != ""
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
@@ -1360,7 +1436,13 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	account := h.pool.GetNext()
+	// 解析模型和 thinking 模式：综合考量 reasoning_effort 字段与模型名后缀
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinkingPrompt := ResolveOpenAIThinking(&req, thinkingCfg.Suffix)
+	req.Model = actualModel
+	thinking := thinkingPrompt != ""
+
+	account := h.pool.GetNextForModel(actualModel)
 	if account == nil {
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
@@ -1371,11 +1453,6 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 解析模型和 thinking 模式：综合考量 reasoning_effort 字段与模型名后缀
-	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinkingPrompt := ResolveOpenAIThinking(&req, thinkingCfg.Suffix)
-	req.Model = actualModel
-	thinking := thinkingPrompt != ""
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinkingPrompt)
@@ -1848,8 +1925,21 @@ func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, me
 
 // ensureValidToken 确保 token 有效
 func (h *Handler) ensureValidToken(account *config.Account) error {
-	if account.ExpiresAt == 0 || time.Now().Unix() < account.ExpiresAt-300 {
+	if account.ExpiresAt == 0 || time.Now().Unix() < account.ExpiresAt-tokenRefreshSkewSeconds {
 		return nil
+	}
+
+	h.tokenRefreshMu.Lock()
+	defer h.tokenRefreshMu.Unlock()
+
+	if latest := h.pool.GetByID(account.ID); latest != nil {
+		account.AccessToken = latest.AccessToken
+		account.RefreshToken = latest.RefreshToken
+		account.ExpiresAt = latest.ExpiresAt
+		account.ProfileArn = latest.ProfileArn
+		if account.ExpiresAt == 0 || time.Now().Unix() < account.ExpiresAt-tokenRefreshSkewSeconds {
+			return nil
+		}
 	}
 
 	res, err := auth.RefreshToken(account)
@@ -1902,9 +1992,20 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiAddAccount(w, r)
 	case path == "/accounts/batch" && r.Method == "POST":
 		h.apiBatchAccounts(w, r)
+	case path == "/accounts/models/refresh" && r.Method == "POST":
+		h.apiRefreshAllAccountsModels(w, r)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models/refresh") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models/refresh")
+		h.apiRefreshAccountModels(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/refresh") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/refresh")
 		h.apiRefreshAccount(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/test") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/test")
+		h.apiTestAccount(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models/cached") && r.Method == "GET":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models/cached")
+		h.apiGetAccountModelsCached(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models")
 		h.apiGetAccountModels(w, r, id)
@@ -2039,6 +2140,13 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.pool.Reload()
+	if account.Enabled && account.AccessToken != "" {
+		go func(acc config.Account) {
+			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
+				fmt.Printf("[ModelsCache] Auto-refresh failed for new account %s: %v\n", acc.Email, err)
+			}
+		}(account)
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "id": account.ID})
 }
 
@@ -2074,6 +2182,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
 	}
+	oldEnabled := existing.Enabled
 
 	// 只更新传入的字段
 	if v, ok := updates["enabled"].(bool); ok {
@@ -2108,6 +2217,13 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	h.pool.Reload()
+	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
+		go func(acc config.Account) {
+			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
+				fmt.Printf("[ModelsCache] Auto-refresh failed for re-enabled account %s: %v\n", acc.Email, err)
+			}
+		}(*existing)
+	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
@@ -2145,6 +2261,13 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 					a.BanTime = 0
 				}
 				config.UpdateAccount(a.ID, a)
+				if enabled && a.AccessToken != "" {
+					go func(acc config.Account) {
+						if err := h.fetchAndCacheAccountModels(&acc); err != nil {
+							fmt.Printf("[ModelsCache] Auto-refresh failed for batch-enabled account %s: %v\n", acc.Email, err)
+						}
+					}(a)
+				}
 			}
 		}
 		h.pool.Reload()
@@ -2228,7 +2351,6 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"sessionId":    sessionID,
 		"authorizeUrl": authorizeUrl,
@@ -2700,7 +2822,7 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// 检查 token 是否快过期，先刷新
-	if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-300 {
+	if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
 		if err := refreshTokenIfNeeded(); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
@@ -2850,8 +2972,90 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	if err := h.ensureValidToken(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
+		return
+	}
+
 	models, err := ListAvailableModels(account)
 	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	modelIDs := make([]string, 0, len(models))
+	for _, m := range models {
+		modelIDs = append(modelIDs, m.ModelId)
+	}
+	h.pool.SetModelList(account.ID, modelIDs)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"models":  models,
+	})
+}
+
+func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Request, id string) {
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"models":  h.pool.GetModelList(id),
+	})
+}
+
+func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if err := h.ensureValidToken(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
+		return
+	}
+
+	var req struct {
+		Model string `json:"model"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if strings.TrimSpace(req.Model) == "" {
+		req.Model = "claude-sonnet-4"
+	}
+
+	openaiReq := &OpenAIRequest{
+		Model:     req.Model,
+		Messages:  []OpenAIMessage{{Role: "user", Content: "say ok"}},
+		MaxTokens: 5,
+		Stream:    false,
+	}
+	thinkingCfg := config.GetThinkingConfig()
+	actualModel, thinkingPrompt := ResolveOpenAIThinking(openaiReq, thinkingCfg.Suffix)
+	openaiReq.Model = actualModel
+	kiroPayload := OpenAIToKiro(openaiReq, thinkingPrompt)
+
+	var content string
+	callback := &KiroStreamCallback{
+		OnText: func(text string, isThinking bool) {
+			if !isThinking {
+				content += text
+			}
+		},
+		OnToolUse:      func(tu KiroToolUse) {},
+		OnComplete:     func(inputTokens, outputTokens int) {},
+		OnError:        func(err error) {},
+		OnCredits:      func(credits float64) {},
+		OnContextUsage: func(percentage float64) {},
+	}
+	if err := CallKiroAPI(account, kiroPayload, callback); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -2859,7 +3063,8 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"models":  models,
+		"reply":   content,
+		"model":   req.Model,
 	})
 }
 

@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>凭证 JSON 转换器</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: #172033;
+            background: #f6f8fb;
+        }
+
+        .app {
+            width: min(1180px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 28px 0 40px;
+        }
+
+        header {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 18px;
+        }
+
+        h1 {
+            margin: 0 0 6px;
+            font-size: 24px;
+            line-height: 1.25;
+        }
+
+        .subtle {
+            margin: 0;
+            color: #64748b;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+            gap: 16px;
+            align-items: start;
+        }
+
+        .panel {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 18px;
+            box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+        }
+
+        .panel + .panel {
+            margin-top: 16px;
+        }
+
+        .panel-title {
+            margin: 0 0 14px;
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 13px;
+            font-weight: 650;
+            color: #334155;
+        }
+
+        input,
+        textarea {
+            width: 100%;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            background: #fff;
+            color: #111827;
+            font: inherit;
+            font-size: 14px;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+
+        input {
+            height: 42px;
+            padding: 0 12px;
+        }
+
+        textarea {
+            min-height: 230px;
+            padding: 12px;
+            resize: vertical;
+            line-height: 1.55;
+            font-family: "Cascadia Mono", Consolas, monospace;
+        }
+
+        input:focus,
+        textarea:focus {
+            outline: none;
+            border-color: #0891b2;
+            box-shadow: 0 0 0 3px rgba(8, 145, 178, 0.14);
+        }
+
+        .hint {
+            margin-top: 6px;
+            color: #64748b;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 14px;
+        }
+
+        button {
+            border: 0;
+            border-radius: 8px;
+            min-height: 40px;
+            padding: 0 14px;
+            color: #fff;
+            background: #0891b2;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0e7490;
+        }
+
+        button.secondary {
+            color: #334155;
+            background: #e2e8f0;
+        }
+
+        button.secondary:hover {
+            background: #cbd5e1;
+        }
+
+        button.ghost {
+            color: #0f766e;
+            background: #ccfbf1;
+        }
+
+        button.ghost:hover {
+            background: #99f6e4;
+        }
+
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        .status {
+            display: none;
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .status.show {
+            display: block;
+        }
+
+        .status.ok {
+            color: #065f46;
+            background: #d1fae5;
+        }
+
+        .status.warn {
+            color: #92400e;
+            background: #fef3c7;
+        }
+
+        .status.error {
+            color: #991b1b;
+            background: #fee2e2;
+        }
+
+        .result-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .count {
+            color: #475569;
+            font-size: 13px;
+        }
+
+        .file-list {
+            display: grid;
+            gap: 10px;
+            max-height: 300px;
+            overflow: auto;
+            padding-right: 4px;
+        }
+
+        .file-item {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+            align-items: center;
+            padding: 10px 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            background: #f8fafc;
+        }
+
+        .file-name {
+            overflow: hidden;
+            color: #0f172a;
+            font-family: "Cascadia Mono", Consolas, monospace;
+            font-size: 13px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .mini {
+            min-height: 32px;
+            padding: 0 10px;
+            font-size: 12px;
+        }
+
+        pre {
+            min-height: 300px;
+            max-height: 480px;
+            margin: 0;
+            overflow: auto;
+            padding: 14px;
+            border: 1px solid #dbe3ee;
+            border-radius: 8px;
+            background: #0f172a;
+            color: #e5e7eb;
+            font-size: 12px;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .empty {
+            display: grid;
+            min-height: 180px;
+            place-items: center;
+            border: 1px dashed #cbd5e1;
+            border-radius: 8px;
+            color: #64748b;
+            text-align: center;
+            padding: 16px;
+        }
+
+        @media (max-width: 860px) {
+            header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .layout {
+                grid-template-columns: 1fr;
+            }
+
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .app {
+                width: min(100% - 20px, 1180px);
+                padding-top: 18px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <main class="app">
+        <header>
+            <div>
+                <h1>凭证 JSON 转换器</h1>
+                <p class="subtle">把每行 <strong>refresh_token----project_id</strong> 转成单独的 JSON 文件，并可一键打包 ZIP。</p>
+            </div>
+            <button class="secondary" type="button" id="fillExpiryBtn">填入 1 小时后过期时间</button>
+        </header>
+
+        <section class="layout">
+            <div>
+                <section class="panel">
+                    <p class="panel-title">通用字段</p>
+                    <div class="grid">
+                        <div>
+                            <label for="accessToken">access_token</label>
+                            <input id="accessToken" autocomplete="off" placeholder="没有就先留空">
+                        </div>
+                        <div>
+                            <label for="expiry">expiry</label>
+                            <input id="expiry" autocomplete="off" placeholder="例如 2026-05-13T19:30:09.868908+00:00">
+                        </div>
+                        <div>
+                            <label for="clientId">client_id</label>
+                            <input id="clientId" autocomplete="off" placeholder="填你的 client_id">
+                        </div>
+                        <div>
+                            <label for="clientSecret">client_secret</label>
+                            <input id="clientSecret" autocomplete="off" placeholder="填你的 client_secret">
+                        </div>
+                    </div>
+                    <p class="hint">这几个字段会填到每个 JSON 里。access_token 可以留空，后面让程序用 refresh_token 刷新。</p>
+                </section>
+
+                <section class="panel">
+                    <p class="panel-title">粘贴凭证</p>
+                    <label for="sourceText">每行一个，格式是 refresh_token----project_id</label>
+                    <textarea id="sourceText" spellcheck="false" placeholder="1//06xxxx----project-a&#10;1//06yyyy----project-b"></textarea>
+                    <p class="hint">分隔符用四个短横线。文件名会优先使用 project_id，比如 project-a.json。</p>
+                    <div class="actions">
+                        <button type="button" id="convertBtn">开始转换</button>
+                        <button class="ghost" type="button" id="downloadZipBtn" disabled>打包下载 ZIP</button>
+                        <button class="secondary" type="button" id="copyAllBtn" disabled>复制全部 JSON</button>
+                        <button class="secondary" type="button" id="clearBtn">清空</button>
+                    </div>
+                    <div id="status" class="status"></div>
+                </section>
+            </div>
+
+            <div>
+                <section class="panel">
+                    <div class="result-bar">
+                        <p class="panel-title" style="margin:0">生成结果</p>
+                        <span class="count" id="resultCount">0 个文件</span>
+                    </div>
+                    <div id="fileList" class="empty">还没有生成文件。先粘贴凭证，再点“开始转换”。</div>
+                </section>
+
+                <section class="panel">
+                    <p class="panel-title">预览</p>
+                    <pre id="preview">[]</pre>
+                </section>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const state = {
+            files: []
+        };
+
+        const els = {
+            accessToken: document.getElementById('accessToken'),
+            expiry: document.getElementById('expiry'),
+            clientId: document.getElementById('clientId'),
+            clientSecret: document.getElementById('clientSecret'),
+            sourceText: document.getElementById('sourceText'),
+            status: document.getElementById('status'),
+            fileList: document.getElementById('fileList'),
+            resultCount: document.getElementById('resultCount'),
+            preview: document.getElementById('preview'),
+            downloadZipBtn: document.getElementById('downloadZipBtn'),
+            copyAllBtn: document.getElementById('copyAllBtn')
+        };
+
+        function setStatus(type, text) {
+            els.status.className = 'status show ' + type;
+            els.status.textContent = text;
+        }
+
+        function clearStatus() {
+            els.status.className = 'status';
+            els.status.textContent = '';
+        }
+
+        function makeExpiryAfterOneHour() {
+            const date = new Date(Date.now() + 60 * 60 * 1000);
+            return date.toISOString().replace('Z', '+00:00');
+        }
+
+        function safeFileName(value, fallback) {
+            const cleaned = (value || '')
+                .trim()
+                .replace(/[\\/:*?"<>|]+/g, '-')
+                .replace(/\s+/g, '-')
+                .replace(/^-+|-+$/g, '');
+            return (cleaned || fallback) + '.json';
+        }
+
+        function uniqueFileName(name, used) {
+            if (!used.has(name)) {
+                used.add(name);
+                return name;
+            }
+
+            const dot = name.lastIndexOf('.');
+            const base = dot >= 0 ? name.slice(0, dot) : name;
+            const ext = dot >= 0 ? name.slice(dot) : '';
+            let i = 2;
+            let next = base + '-' + i + ext;
+            while (used.has(next)) {
+                i += 1;
+                next = base + '-' + i + ext;
+            }
+            used.add(next);
+            return next;
+        }
+
+        function parseLine(line, index) {
+            const delimiter = '----';
+            const cut = line.lastIndexOf(delimiter);
+            if (cut < 0) {
+                throw new Error('第 ' + index + ' 行少了分隔符 ----');
+            }
+
+            const refreshToken = line.slice(0, cut).trim();
+            const projectId = line.slice(cut + delimiter.length).trim();
+            if (!refreshToken) {
+                throw new Error('第 ' + index + ' 行 refresh_token 是空的');
+            }
+            if (!projectId) {
+                throw new Error('第 ' + index + ' 行 project_id 是空的');
+            }
+            return { refreshToken, projectId };
+        }
+
+        function buildCredential(item) {
+            return {
+                access_token: els.accessToken.value.trim(),
+                refresh_token: item.refreshToken,
+                client_id: els.clientId.value.trim(),
+                client_secret: els.clientSecret.value.trim(),
+                project_id: item.projectId,
+                expiry: els.expiry.value.trim()
+            };
+        }
+
+        function convert() {
+            clearStatus();
+            const lines = els.sourceText.value
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean);
+
+            if (lines.length === 0) {
+                state.files = [];
+                render();
+                setStatus('warn', '先粘贴至少一行凭证。');
+                return;
+            }
+
+            const errors = [];
+            const files = [];
+            const usedNames = new Set();
+
+            lines.forEach((line, lineIndex) => {
+                try {
+                    const parsed = parseLine(line, lineIndex + 1);
+                    const credential = buildCredential(parsed);
+                    const fileName = uniqueFileName(safeFileName(parsed.projectId, 'credential-' + String(lineIndex + 1).padStart(2, '0')), usedNames);
+                    files.push({
+                        name: fileName,
+                        data: credential,
+                        text: JSON.stringify(credential, null, 2)
+                    });
+                } catch (err) {
+                    errors.push(err.message);
+                }
+            });
+
+            state.files = files;
+            render();
+
+            if (errors.length > 0 && files.length > 0) {
+                setStatus('warn', '已生成 ' + files.length + ' 个文件，但有几行没成功：' + errors.join('；'));
+                return;
+            }
+            if (errors.length > 0) {
+                setStatus('error', errors.join('；'));
+                return;
+            }
+            setStatus('ok', '转换完成：已生成 ' + files.length + ' 个 JSON 文件。');
+        }
+
+        function render() {
+            els.resultCount.textContent = state.files.length + ' 个文件';
+            els.downloadZipBtn.disabled = state.files.length === 0;
+            els.copyAllBtn.disabled = state.files.length === 0;
+
+            if (state.files.length === 0) {
+                els.fileList.className = 'empty';
+                els.fileList.textContent = '还没有生成文件。先粘贴凭证，再点“开始转换”。';
+                els.preview.textContent = '[]';
+                return;
+            }
+
+            els.fileList.className = 'file-list';
+            els.fileList.innerHTML = '';
+            state.files.forEach((file, index) => {
+                const item = document.createElement('div');
+                item.className = 'file-item';
+
+                const name = document.createElement('div');
+                name.className = 'file-name';
+                name.title = file.name;
+                name.textContent = file.name;
+
+                const button = document.createElement('button');
+                button.className = 'mini secondary';
+                button.type = 'button';
+                button.textContent = '下载';
+                button.addEventListener('click', () => downloadJson(index));
+
+                item.append(name, button);
+                els.fileList.append(item);
+            });
+
+            els.preview.textContent = state.files.map(file => file.name + '\n' + file.text).join('\n\n');
+        }
+
+        function downloadBlob(blob, fileName) {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = fileName;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        }
+
+        function downloadJson(index) {
+            const file = state.files[index];
+            if (!file) return;
+            downloadBlob(new Blob([file.text], { type: 'application/json;charset=utf-8' }), file.name);
+        }
+
+        function copyAllJson() {
+            const text = state.files.map(file => file.name + '\n' + file.text).join('\n\n');
+            navigator.clipboard.writeText(text).then(() => {
+                setStatus('ok', '已复制全部 JSON。');
+            }).catch(() => {
+                setStatus('error', '浏览器不允许自动复制，可以在预览框里手动复制。');
+            });
+        }
+
+        const crcTable = (() => {
+            const table = new Uint32Array(256);
+            for (let i = 0; i < 256; i++) {
+                let c = i;
+                for (let k = 0; k < 8; k++) {
+                    c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+                }
+                table[i] = c >>> 0;
+            }
+            return table;
+        })();
+
+        function crc32(bytes) {
+            let crc = 0xffffffff;
+            for (const byte of bytes) {
+                crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+            }
+            return (crc ^ 0xffffffff) >>> 0;
+        }
+
+        function u16(value) {
+            return new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
+        }
+
+        function u32(value) {
+            return new Uint8Array([
+                value & 0xff,
+                (value >>> 8) & 0xff,
+                (value >>> 16) & 0xff,
+                (value >>> 24) & 0xff
+            ]);
+        }
+
+        function dosTimeDate(date) {
+            const year = Math.max(1980, date.getFullYear());
+            const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+            const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+            return { dosTime, dosDate };
+        }
+
+        function makeZip(files) {
+            const encoder = new TextEncoder();
+            const chunks = [];
+            const central = [];
+            let offset = 0;
+            const now = dosTimeDate(new Date());
+
+            files.forEach(file => {
+                const nameBytes = encoder.encode(file.name);
+                const dataBytes = encoder.encode(file.text);
+                const crc = crc32(dataBytes);
+
+                const localParts = [
+                    u32(0x04034b50),
+                    u16(20),
+                    u16(0x0800),
+                    u16(0),
+                    u16(now.dosTime),
+                    u16(now.dosDate),
+                    u32(crc),
+                    u32(dataBytes.length),
+                    u32(dataBytes.length),
+                    u16(nameBytes.length),
+                    u16(0),
+                    nameBytes,
+                    dataBytes
+                ];
+                chunks.push(...localParts);
+
+                central.push(
+                    u32(0x02014b50),
+                    u16(20),
+                    u16(20),
+                    u16(0x0800),
+                    u16(0),
+                    u16(now.dosTime),
+                    u16(now.dosDate),
+                    u32(crc),
+                    u32(dataBytes.length),
+                    u32(dataBytes.length),
+                    u16(nameBytes.length),
+                    u16(0),
+                    u16(0),
+                    u16(0),
+                    u16(0),
+                    u32(0),
+                    u32(offset),
+                    nameBytes
+                );
+
+                offset += localParts.reduce((sum, part) => sum + part.length, 0);
+            });
+
+            const centralOffset = offset;
+            const centralSize = central.reduce((sum, part) => sum + part.length, 0);
+            const end = [
+                u32(0x06054b50),
+                u16(0),
+                u16(0),
+                u16(files.length),
+                u16(files.length),
+                u32(centralSize),
+                u32(centralOffset),
+                u16(0)
+            ];
+
+            return new Blob([...chunks, ...central, ...end], { type: 'application/zip' });
+        }
+
+        function downloadZip() {
+            if (state.files.length === 0) return;
+            const date = new Date().toISOString().slice(0, 10);
+            downloadBlob(makeZip(state.files), 'credentials-' + date + '.zip');
+        }
+
+        document.getElementById('convertBtn').addEventListener('click', convert);
+        document.getElementById('downloadZipBtn').addEventListener('click', downloadZip);
+        document.getElementById('copyAllBtn').addEventListener('click', copyAllJson);
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            els.sourceText.value = '';
+            state.files = [];
+            clearStatus();
+            render();
+        });
+        document.getElementById('fillExpiryBtn').addEventListener('click', () => {
+            els.expiry.value = makeExpiryAfterOneHour();
+        });
+
+        els.expiry.value = makeExpiryAfterOneHour();
+        render();
+    </script>
+</body>
+
+</html>

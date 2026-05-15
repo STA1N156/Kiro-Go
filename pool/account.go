@@ -4,10 +4,13 @@ package pool
 
 import (
 	"kiro-go/config"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+const tokenRefreshSkewSeconds int64 = 120
 
 // AccountPool 账号池
 type AccountPool struct {
@@ -16,6 +19,7 @@ type AccountPool struct {
 	currentIndex uint64
 	cooldowns    map[string]time.Time // 账号冷却时间
 	errorCounts  map[string]int       // 连续错误计数
+	modelLists   map[string]map[string]bool
 }
 
 var (
@@ -29,6 +33,7 @@ func GetPool() *AccountPool {
 		pool = &AccountPool{
 			cooldowns:   make(map[string]time.Time),
 			errorCounts: make(map[string]int),
+			modelLists:  make(map[string]map[string]bool),
 		}
 		pool.Reload()
 	})
@@ -83,7 +88,7 @@ func (p *AccountPool) GetNext() *config.Account {
 		}
 
 		// 跳过即将过期的 Token
-		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-300 {
+		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
 			seen[acc.ID] = true
 			continue
 		}
@@ -103,6 +108,103 @@ func (p *AccountPool) GetNext() *config.Account {
 	for i := range p.accounts {
 		acc := &p.accounts[i]
 		// 额度用尽的账号不作为 fallback
+		if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
+			continue
+		}
+		if cooldown, ok := p.cooldowns[acc.ID]; ok {
+			if best == nil || cooldown.Before(earliest) {
+				best = acc
+				earliest = cooldown
+			}
+		} else {
+			return acc
+		}
+	}
+	return best
+}
+
+// SetModelList 缓存账号支持的模型集合，由 handler 刷新模型列表后写入。
+func (p *AccountPool) SetModelList(accountID string, modelIDs []string) {
+	set := make(map[string]bool, len(modelIDs))
+	for _, id := range modelIDs {
+		key := strings.ToLower(strings.TrimSpace(id))
+		if key != "" {
+			set[key] = true
+		}
+	}
+	p.mu.Lock()
+	p.modelLists[accountID] = set
+	p.mu.Unlock()
+}
+
+// GetModelList 返回账号已缓存的模型 ID；没有缓存时返回空列表。
+func (p *AccountPool) GetModelList(accountID string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	set, ok := p.modelLists[accountID]
+	if !ok || len(set) == 0 {
+		return []string{}
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (p *AccountPool) accountHasModel(accountID, model string) bool {
+	list, ok := p.modelLists[accountID]
+	if !ok || len(list) == 0 {
+		return true
+	}
+	return list[strings.ToLower(strings.TrimSpace(model))]
+}
+
+// GetNextForModel 获取下一个支持指定模型的可用账号。
+func (p *AccountPool) GetNextForModel(model string) *config.Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if len(p.accounts) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	n := len(p.accounts)
+	seen := make(map[string]bool)
+
+	for i := 0; i < n; i++ {
+		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
+		acc := &p.accounts[idx]
+		if seen[acc.ID] {
+			continue
+		}
+		if !p.accountHasModel(acc.ID, model) {
+			seen[acc.ID] = true
+			continue
+		}
+		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			seen[acc.ID] = true
+			continue
+		}
+		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
+			seen[acc.ID] = true
+			continue
+		}
+		if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
+			seen[acc.ID] = true
+			continue
+		}
+		return acc
+	}
+
+	var best *config.Account
+	var earliest time.Time
+	for i := range p.accounts {
+		acc := &p.accounts[i]
+		if !p.accountHasModel(acc.ID, model) {
+			continue
+		}
 		if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
 			continue
 		}
