@@ -4,21 +4,24 @@ package pool
 
 import (
 	"kiro-go/config"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 const overageFrequencyScale = 10
+const tokenRefreshSkewSeconds int64 = 120
 
 // AccountPool 账号池
 type AccountPool struct {
-	mu           sync.RWMutex
-	accounts     []config.Account
+	mu            sync.RWMutex
+	accounts      []config.Account
 	totalAccounts int
-	currentIndex uint64
-	cooldowns    map[string]time.Time // 账号冷却时间
-	errorCounts  map[string]int       // 连续错误计数
+	currentIndex  uint64
+	cooldowns     map[string]time.Time       // 账号冷却时间
+	errorCounts   map[string]int             // 连续错误计数
+	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
 }
 
 var (
@@ -32,6 +35,7 @@ func GetPool() *AccountPool {
 		pool = &AccountPool{
 			cooldowns:   make(map[string]time.Time),
 			errorCounts: make(map[string]int),
+			modelLists:  make(map[string]map[string]bool),
 		}
 		pool.Reload()
 	})
@@ -70,6 +74,7 @@ func (p *AccountPool) GetNext() *config.Account {
 		return nil
 	}
 
+	allowOverUsage := config.GetAllowOverUsage()
 	now := time.Now()
 	n := len(p.accounts)
 	seen := make(map[string]bool)
@@ -90,13 +95,13 @@ func (p *AccountPool) GetNext() *config.Account {
 		}
 
 		// 跳过即将过期的 Token
-		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-300 {
+		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
 			seen[acc.ID] = true
 			continue
 		}
 
-		// 跳过额度已用尽的账号（适用于所有订阅类型）
-		if isOverUsageLimit(*acc) && !acc.AllowOverage {
+		// 跳过额度已用尽的账号（账号级 AllowOverage 或全局 AllowOverUsage 可放行）
+		if isOverUsageLimit(*acc) && !acc.AllowOverage && !allowOverUsage {
 			seen[acc.ID] = true
 			continue
 		}
@@ -104,13 +109,115 @@ func (p *AccountPool) GetNext() *config.Account {
 		return acc
 	}
 
-	// 无可用账号，返回冷却时间最短的（排除额度用尽的）
+	// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
 		acc := &p.accounts[i]
-		// 额度用尽的账号不作为 fallback
-		if isOverUsageLimit(*acc) && !acc.AllowOverage {
+		// 额度用尽的账号不作为 fallback（除非账号级或全局允许超额）
+		if isOverUsageLimit(*acc) && !acc.AllowOverage && !allowOverUsage {
+			continue
+		}
+		if cooldown, ok := p.cooldowns[acc.ID]; ok {
+			if best == nil || cooldown.Before(earliest) {
+				best = acc
+				earliest = cooldown
+			}
+		} else {
+			return acc
+		}
+	}
+	return best
+}
+
+// SetModelList 缓存账号支持的模型集合（由 handler 在刷新后调用）
+func (p *AccountPool) SetModelList(accountID string, modelIDs []string) {
+	set := make(map[string]bool, len(modelIDs))
+	for _, id := range modelIDs {
+		set[strings.ToLower(strings.TrimSpace(id))] = true
+	}
+	p.mu.Lock()
+	p.modelLists[accountID] = set
+	p.mu.Unlock()
+}
+
+// GetModelList 返回该账号缓存的模型 ID 列表（供 admin API 使用）。
+// 若尚无缓存则返回空切片。
+func (p *AccountPool) GetModelList(accountID string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	set, ok := p.modelLists[accountID]
+	if !ok || len(set) == 0 {
+		return []string{}
+	}
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// accountHasModel 检查账号是否支持指定模型。
+// 若该账号尚无模型列表（冷启动），视为支持所有模型。
+func (p *AccountPool) accountHasModel(accountID, model string) bool {
+	list, ok := p.modelLists[accountID]
+	if !ok || len(list) == 0 {
+		return true // 冷启动：列表未就绪，乐观放行
+	}
+	return list[strings.ToLower(strings.TrimSpace(model))]
+}
+
+// GetNextForModel 获取下一个支持指定模型的可用账号。
+// model 应为去掉 thinking 后缀的实际模型名。
+// 若无账号有该模型列表数据，行为与 GetNext 相同（乐观路由）。
+func (p *AccountPool) GetNextForModel(model string) *config.Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if len(p.accounts) == 0 {
+		return nil
+	}
+
+	allowOverUsage := config.GetAllowOverUsage()
+	now := time.Now()
+	n := len(p.accounts)
+	seen := make(map[string]bool)
+
+	for i := 0; i < n; i++ {
+		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
+		acc := &p.accounts[idx]
+
+		if seen[acc.ID] {
+			continue
+		}
+		if !p.accountHasModel(acc.ID, model) {
+			seen[acc.ID] = true
+			continue
+		}
+		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			seen[acc.ID] = true
+			continue
+		}
+		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
+			seen[acc.ID] = true
+			continue
+		}
+		if isOverUsageLimit(*acc) && !acc.AllowOverage && !allowOverUsage {
+			seen[acc.ID] = true
+			continue
+		}
+		return acc
+	}
+
+	// fallback：找冷却时间最短且支持该模型的账号
+	var best *config.Account
+	var earliest time.Time
+	for i := range p.accounts {
+		acc := &p.accounts[i]
+		if !p.accountHasModel(acc.ID, model) {
+			continue
+		}
+		if isOverUsageLimit(*acc) && !acc.AllowOverage && !allowOverUsage {
 			continue
 		}
 		if cooldown, ok := p.cooldowns[acc.ID]; ok {

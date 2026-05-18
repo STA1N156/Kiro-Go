@@ -1,5 +1,5 @@
 {
-  "version": "1.0.9",
-  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main（截至 fdb0251）\n✨ 上游新增：outbound proxy（socks5/http）支持、cookie 导入登录、账号超额降频复用、logger 分级日志、contextUsageEvent 精准 input_tokens、Claude thinking 配置路由、prompt cache 指纹稳定化、Kiro profile ARN 自动解析\n🆕 保留本地：请求调用日志（环形缓冲 + 持久化 + 保留天数 + 分页 + 手动清除）、多 API Key 管理、admin 面板日志页面\n🆕 保留本地：claude-3-7-sonnet-20250219 映射、<thinking> 标签真实边界识别、[Called ...] 工具调用兜底解析、Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型",
+  "version": "1.0.10",
+  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main（截至 68110f3，v1.0.8）\n✨ 上游新增：每账户独立 outbound proxy 配置与 admin UI、每账户模型选择（移除全局测试模型）、token 刷新时序与并发修复（skew 120s）、超额控制与 402 处理、模型路由与 prompt 过滤改进、模型列表缓存维护优化、models 端点路由顺序修正、per-account 测试按钮专用端点\n🆕 保留本地：请求调用日志（环形缓冲 + 持久化 + 保留天数 + 分页 + 手动清除）、多 API Key 管理、admin 面板日志页面、cookie 导入登录\n🆕 保留本地：claude-3-7-sonnet-20250219 映射、<thinking> 标签真实边界识别、[Called ...] 工具调用兜底解析、Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }

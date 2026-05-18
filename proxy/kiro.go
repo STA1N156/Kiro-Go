@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,8 +54,55 @@ var kiroEndpoints = []kiroEndpoint{
 var kiroHttpStore atomic.Pointer[http.Client]
 var kiroRestHttpStore atomic.Pointer[http.Client]
 
+// proxyClientCache caches http.Client instances keyed by proxy URL for per-account proxy support.
+var proxyClientCache sync.Map
+
 func init() {
 	InitKiroHttpClient("")
+}
+
+// GetClientForProxy returns an http.Client configured for the given proxy URL.
+// If proxyURL is empty, returns the global kiro HTTP client.
+func GetClientForProxy(proxyURL string) *http.Client {
+	if proxyURL == "" {
+		return kiroHttpStore.Load()
+	}
+	if cached, ok := proxyClientCache.Load(proxyURL); ok {
+		return cached.(*http.Client)
+	}
+	client := &http.Client{
+		Timeout:   5 * time.Minute,
+		Transport: buildKiroTransport(proxyURL),
+	}
+	proxyClientCache.Store(proxyURL, client)
+	return client
+}
+
+// GetRestClientForProxy returns a rest http.Client (30s timeout) for the given proxy URL.
+// If proxyURL is empty, returns the global kiro REST HTTP client.
+func GetRestClientForProxy(proxyURL string) *http.Client {
+	if proxyURL == "" {
+		return kiroRestHttpStore.Load()
+	}
+	cacheKey := "rest:" + proxyURL
+	if cached, ok := proxyClientCache.Load(cacheKey); ok {
+		return cached.(*http.Client)
+	}
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: buildKiroTransport(proxyURL),
+	}
+	proxyClientCache.Store(cacheKey, client)
+	return client
+}
+
+// ResolveAccountProxyURL returns the effective proxy URL for an account.
+// Falls back to global config.GetProxyURL() if the account has no per-account proxy.
+func ResolveAccountProxyURL(account *config.Account) string {
+	if account != nil && account.ProxyURL != "" {
+		return account.ProxyURL
+	}
+	return config.GetProxyURL()
 }
 
 // buildKiroTransport constructs an HTTP Transport with optional outbound proxy support.
@@ -305,7 +353,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			req.Header.Set("tokentype", "API_KEY")
 		}
 
-		resp, err := kiroHttpStore.Load().Do(req)
+		resp, err := GetClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 		if err != nil {
 			lastErr = err
 			logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
@@ -356,7 +404,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 					if account.AuthMethod == "api_key" {
 						req2.Header.Set("tokentype", "API_KEY")
 					}
-					resp2, err2 := kiroHttpStore.Load().Do(req2)
+					resp2, err2 := GetClientForProxy(ResolveAccountProxyURL(account)).Do(req2)
 					if err2 == nil {
 						if resp2.StatusCode == 200 {
 							err := parseEventStream(resp2.Body, callback)
@@ -369,8 +417,8 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 					}
 				}
 			}
-			// Authentication errors are not retried across endpoints.
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			// Authentication errors and payment errors are not retried across endpoints.
+			if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
 				return lastErr
 			}
 			logger.Warnf("[KiroAPI] Endpoint %s error: %v", ep.Name, lastErr)

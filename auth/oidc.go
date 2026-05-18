@@ -29,6 +29,8 @@ type RefreshResult struct {
 //
 // 对于 authMethod == "api_key" 的 Kiro CLI headless 凭据，直接将已存的 API Key
 // 当作 access token 返回，跳过刷新流程。
+//
+// 代理解析顺序：account.ProxyURL > 全局 config.GetProxyURL()。
 func RefreshToken(account *config.Account) (RefreshResult, error) {
 	if account.AuthMethod == "api_key" {
 		return RefreshResult{
@@ -36,10 +38,17 @@ func RefreshToken(account *config.Account) (RefreshResult, error) {
 			ExpiresAt:   0, // 永不到期
 		}, nil
 	}
-	if account.AuthMethod == "social" {
-		return refreshSocialToken(account.RefreshToken)
+
+	proxyURL := account.ProxyURL
+	if proxyURL == "" {
+		proxyURL = config.GetProxyURL()
 	}
-	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.Region)
+	client := GetAuthClientForProxy(proxyURL)
+
+	if account.AuthMethod == "social" {
+		return refreshSocialToken(account.RefreshToken, client)
+	}
+	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
 }
 
 // classifyRefreshError 识别 OIDC/Social 刷新返回是否为 invalid_grant 类错误。
@@ -72,7 +81,7 @@ func classifyRefreshError(status int, body []byte) error {
 }
 
 // refreshOIDCToken IdC/Builder ID token 刷新
-func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (RefreshResult, error) {
+func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, client *http.Client) (RefreshResult, error) {
 	if clientID == "" || clientSecret == "" {
 		return RefreshResult{}, fmt.Errorf("OIDC refresh requires clientId and clientSecret")
 	}
@@ -93,7 +102,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (Refr
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -124,7 +133,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string) (Refr
 }
 
 // refreshSocialToken Social (GitHub/Google) token 刷新
-func refreshSocialToken(refreshToken string) (RefreshResult, error) {
+func refreshSocialToken(refreshToken string, client *http.Client) (RefreshResult, error) {
 	url := "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
 
 	payload := map[string]string{
@@ -135,7 +144,7 @@ func refreshSocialToken(refreshToken string) (RefreshResult, error) {
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return RefreshResult{}, err
 	}
