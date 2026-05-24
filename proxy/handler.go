@@ -275,6 +275,10 @@ func (h *Handler) refreshAllAccounts() {
 			if err != nil {
 				h.handleRefreshErr(account, err)
 				logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
+				if pool.IsAuthFailure(err) {
+					logger.Warnf("[BackgroundRefresh] Disabling %s (refresh token revoked)", account.Email)
+					h.pool.DisableAccount(account.ID, "refresh token revoked: "+err.Error())
+				}
 				continue
 			}
 			account.AccessToken = res.AccessToken
@@ -799,6 +803,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON: "+err.Error())
 		return
 	}
+
 	if msg := validateClaudeRequestShape(&req); msg != "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
@@ -806,15 +811,34 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// 获取账号（按模型过滤，优先选支持该模型的账号）
 	actualModel, _ := ParseModelAndThinking(req.Model, config.GetThinkingConfig().Suffix)
-	account := h.pool.GetNextForModel(actualModel)
-	if account == nil {
-		h.sendClaudeError(w, 503, "api_error", "No available accounts")
-		return
-	}
+	var account *config.Account
+	var lastTokenErr error
+	const maxAccountAttempts = 5
+	triedIDs := make(map[string]bool)
+	for attempt := 0; attempt < maxAccountAttempts; attempt++ {
+		// GetNextForModelExcluding skips already-tried accounts and returns nil
+		// immediately when no further candidates exist, avoiding empty spins.
+		candidate := h.pool.GetNextForModelExcluding(actualModel, triedIDs)
+		if candidate == nil {
+			break
+		}
+		triedIDs[candidate.ID] = true
 
-	// 检查并刷新 token
-	if err := h.ensureValidToken(account); err != nil {
-		h.sendClaudeError(w, 503, "api_error", "Token refresh failed: "+err.Error())
+		if err := h.ensureValidToken(candidate); err != nil {
+			lastTokenErr = err
+			// ensureValidToken already disables the account on auth failure;
+			// loop and pick the next candidate.
+			continue
+		}
+		account = candidate
+		break
+	}
+	if account == nil {
+		if lastTokenErr != nil {
+			h.sendClaudeError(w, 503, "api_error", "Token refresh failed: "+lastTokenErr.Error())
+		} else {
+			h.sendClaudeError(w, 503, "api_error", "No available accounts")
+		}
 		return
 	}
 
@@ -1189,7 +1213,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 			outputTokens = outTok
 		},
 		OnError: func(err error) {
-			h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "quota"))
+			h.handleAccountError(account.ID, err)
 		},
 		OnCredits: func(c float64) {
 			credits = c
@@ -1202,8 +1226,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, account *config.Acco
 	err := CallKiroAPI(account, payload, callback)
 	if err != nil {
 		h.recordFailure()
-		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "quota"))
-		h.checkOverageError(err, account.ID)
+		h.handleAccountError(account.ID, err)
 		h.requestLogs.Add(RequestLog{
 			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 			Account: account.Email, APIType: "claude", Stream: true,
@@ -1337,7 +1360,30 @@ func (h *Handler) checkOverageError(err error, accountID string) {
 	errMsg := err.Error()
 	if strings.Contains(errMsg, "402") && strings.Contains(errMsg, "OVERAGE") {
 		logger.Warnf("[Overage] Detected overage limit error for account %s, disabling AllowOverage", accountID)
-		config.DisableAccountOverage(accountID)
+		h.pool.MarkOverLimit(accountID)
+	}
+}
+
+// handleAccountError unifies error post-processing for upstream Kiro API failures.
+// It records the error, checks for overage / auth-revoked conditions, and disables
+// the account if upstream rejects its credentials so subsequent requests skip it.
+func (h *Handler) handleAccountError(accountID string, err error) {
+	if err == nil {
+		return
+	}
+	errMsg := err.Error()
+	isQuota := strings.Contains(errMsg, "429") || strings.Contains(errMsg, "quota")
+	h.pool.RecordError(accountID, isQuota)
+	h.checkOverageError(err, accountID)
+
+	// If upstream returned 401/403 mid-request, the access token was revoked.
+	// Disable the account so we don't retry it for every incoming request.
+	if pool.IsAuthFailure(err) {
+		logger.Warnf("[Auth] Upstream rejected credentials for account %s (%v) — disabling", accountID, err)
+		h.pool.DisableAccount(accountID, "upstream auth failure: "+errMsg)
+	} else if pool.IsSuspensionError(err) {
+		logger.Warnf("[Auth] Account %s suspended or has no available profile (%v) — disabling", accountID, err)
+		h.pool.DisableAccount(accountID, "account suspended: "+errMsg)
 	}
 }
 
@@ -1367,7 +1413,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 			outputTokens = outTok
 		},
 		OnError: func(err error) {
-			h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
+			h.handleAccountError(account.ID, err)
 		},
 		OnCredits: func(c float64) {
 			credits = c
@@ -1380,8 +1426,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	err := CallKiroAPI(account, payload, callback)
 	if err != nil {
 		h.recordFailure()
-		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
-		h.checkOverageError(err, account.ID)
+		h.handleAccountError(account.ID, err)
 		h.requestLogs.Add(RequestLog{
 			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 			Account: account.Email, APIType: "claude", Stream: false,
@@ -1500,14 +1545,33 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actualModel, _ := ParseModelAndThinking(req.Model, config.GetThinkingConfig().Suffix)
-	account := h.pool.GetNextForModel(actualModel)
-	if account == nil {
-		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
-		return
-	}
+	var account *config.Account
+	var lastTokenErr error
+	const maxAccountAttempts = 5
+	triedIDs := make(map[string]bool)
+	for attempt := 0; attempt < maxAccountAttempts; attempt++ {
+		candidate := h.pool.GetNextForModel(actualModel)
+		if candidate == nil {
+			break
+		}
+		if triedIDs[candidate.ID] {
+			continue
+		}
+		triedIDs[candidate.ID] = true
 
-	if err := h.ensureValidToken(account); err != nil {
-		h.sendOpenAIError(w, 503, "server_error", "Token refresh failed")
+		if err := h.ensureValidToken(candidate); err != nil {
+			lastTokenErr = err
+			continue
+		}
+		account = candidate
+		break
+	}
+	if account == nil {
+		if lastTokenErr != nil {
+			h.sendOpenAIError(w, 503, "server_error", "Token refresh failed: "+lastTokenErr.Error())
+		} else {
+			h.sendOpenAIError(w, 503, "server_error", "No available accounts")
+		}
 		return
 	}
 
@@ -1837,7 +1901,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 			outputTokens = outTok
 		},
 		OnError: func(err error) {
-			h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
+			h.handleAccountError(account.ID, err)
 		},
 		OnCredits: func(c float64) {
 			credits = c
@@ -1850,8 +1914,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, account *config.Acco
 	err := CallKiroAPI(account, payload, callback)
 	if err != nil {
 		h.recordFailure()
-		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
-		h.checkOverageError(err, account.ID)
+		h.handleAccountError(account.ID, err)
 		h.requestLogs.Add(RequestLog{
 			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 			Account: account.Email, APIType: "openai", Stream: true,
@@ -1944,7 +2007,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		},
 		OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
 		OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-		OnError:    func(err error) { h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429")) },
+		OnError:    func(err error) { h.handleAccountError(account.ID, err) },
 		OnCredits:  func(c float64) { credits = c },
 		OnContextUsage: func(pct float64) {
 			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
@@ -1954,8 +2017,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 	err := CallKiroAPI(account, payload, callback)
 	if err != nil {
 		h.recordFailure()
-		h.pool.RecordError(account.ID, strings.Contains(err.Error(), "429"))
-		h.checkOverageError(err, account.ID)
+		h.handleAccountError(account.ID, err)
 		h.requestLogs.Add(RequestLog{
 			ID: uuid.New().String(), Timestamp: time.Now().Unix(), Model: model,
 			Account: account.Email, APIType: "openai", Stream: false,
@@ -3564,12 +3626,14 @@ func (h *Handler) handleRefreshErr(account *config.Account, err error) error {
 	if account == nil || err == nil {
 		return err
 	}
-	if errors.Is(err, auth.ErrInvalidGrant) {
+	// 检测条件：invalid_grant (OIDC sentinel) 或任意 auth failure (401/403/invalid_token 等)
+	// 二者并存覆盖 OIDC 包返回 sentinel 与 HTTP 错误透传两种场景
+	if errors.Is(err, auth.ErrInvalidGrant) || pool.IsAuthFailure(err) {
 		_ = config.DisableAccount(account.ID, err.Error())
 		if h.pool != nil {
 			h.pool.Reload()
 		}
-		logger.Warnf("[Refresh] Account %s disabled (invalid_grant)", account.Email)
+		logger.Warnf("[Refresh] Account %s disabled (refresh failed: %v)", account.Email, err)
 	}
 	return err
 }
