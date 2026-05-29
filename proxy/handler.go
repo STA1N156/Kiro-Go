@@ -3084,6 +3084,8 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
+		// Rebuild the pool so over-quota accounts are re-included or dropped immediately.
+		h.pool.Reload()
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})

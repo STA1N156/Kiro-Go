@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
-  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main（截至 d8f52f7，v1.1.0）\n✨ 上游新增：多 API Key 按 key 用量限制与统计、OpenAI /v1/responses 端点（含存储响应与流式）、行格式凭据导入、每账户 Overages 开关（AWS Q setUserPreference）、Zeabur 部署支持\n🆕 保留本地：请求调用日志（环形缓冲 + 持久化 + 保留天数 + 分页 + 手动清除）、admin 面板日志页面、cookie 导入登录\n🆕 保留本地：claude-3-7-sonnet-20250219 映射、<thinking> 标签真实边界识别、[Called ...] 工具调用兜底解析、Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型",
+  "version": "1.1.1",
+  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main（截至 11b0c91，v1.1.1）\n✨ 上游新增：批量删除账号、页面内容和中英文文案更新、Reload 账号过滤尊重 allowOverUsage、版本升级至 v1.1.1\n🆕 保留本地：请求调用日志（环形缓冲 + 持久化 + 保留天数 + 分页 + 手动清除）、admin 面板日志页面、cookie 导入登录、多 API Key 管理、本地 thinking/工具调用兼容增强、Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }

@@ -12,29 +12,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// 模型映射（有序，长 key 优先匹配，避免 "claude-sonnet-4" 误匹配 "claude-sonnet-4.5"）
+// modelAliases 仅保留无法通过通用规则归一化的模型别名。
+// 普通 claude-{family}-N-M 会由 claudeVersionPattern 统一转为点号版本。
 type modelMapping struct {
 	key   string
 	value string
 }
 
-var modelMapOrdered = []modelMapping{
+var modelAliases = []modelMapping{
 	{"claude-sonnet-4-20250514", "claude-sonnet-4"},
-	{"claude-sonnet-4-5", "claude-sonnet-4.5"},
-	{"claude-sonnet-4.5", "claude-sonnet-4.5"},
-	{"claude-sonnet-4-6", "claude-sonnet-4.6"},
-	{"claude-sonnet-4.6", "claude-sonnet-4.6"},
-	{"claude-opus-4-7", "claude-opus-4.7"},
-	{"claude-opus-4.7", "claude-opus-4.7"},
-	{"claude-haiku-4-5", "claude-haiku-4.5"},
-	{"claude-haiku-4.5", "claude-haiku-4.5"},
-	{"claude-opus-4-5", "claude-opus-4.5"},
-	{"claude-opus-4.5", "claude-opus-4.5"},
-	{"claude-opus-4-6", "claude-opus-4.6"},
-	{"claude-opus-4.6", "claude-opus-4.6"},
-	{"claude-opus-4-7", "claude-opus-4.7"},
-	{"claude-opus-4.7", "claude-opus-4.7"},
-	{"claude-sonnet-4", "claude-sonnet-4"},
 	{"claude-3-7-sonnet-20250219", "claude-3-7-sonnet-20250219"},
 	{"claude-3-7-sonnet", "claude-3-7-sonnet-20250219"},
 	{"claude-3-5-sonnet", "claude-sonnet-4.5"},
@@ -103,6 +89,10 @@ func buildThinkingPrompt(t *ClaudeThinkingConfig) string {
 // 仅用于历史调用点，新代码请使用 buildThinkingPrompt。
 const ThinkingModePrompt = "<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>200000</max_thinking_length>"
 
+// claudeVersionPattern 将 "claude-{family}-N-M" 归一化为 "claude-{family}-N.M"。
+// minor 限制为 1-2 位并带单词边界，避免误改 dated snapshot。
+var claudeVersionPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku)-(\d+)-(\d{1,2})\b`)
+
 const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
 
@@ -114,7 +104,7 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	lower := strings.ToLower(model)
 	thinking := false
 
-	// 使用配置的后缀检查
+	// 使用配置的 thinking 后缀检查，例如 "-thinking"。
 	suffixLower := strings.ToLower(thinkingSuffix)
 	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
 		thinking = true
@@ -122,14 +112,19 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 		lower = strings.ToLower(model)
 	}
 
-	// 映射模型（有序匹配，长 key 优先）
-	for _, m := range modelMapOrdered {
+	// 1. 显式别名：dated snapshot、跨系列旧模型名、非 Anthropic 兼容名。
+	for _, m := range modelAliases {
 		if strings.Contains(lower, m.key) {
 			return m.value, thinking
 		}
 	}
 
-	// 如果已经是有效的 Kiro 模型，直接返回
+	// 2. 通用归一化：claude-{family}-N-M → claude-{family}-N.M。
+	if claudeVersionPattern.MatchString(lower) {
+		return claudeVersionPattern.ReplaceAllString(lower, "claude-$1-$2.$3"), thinking
+	}
+
+	// 3. 已是有效 Kiro 模型时直接透传。
 	if strings.HasPrefix(lower, "claude-") {
 		return model, thinking
 	}
@@ -225,7 +220,7 @@ type ClaudeRequest struct {
 	Temperature float64               `json:"temperature,omitempty"`
 	TopP        float64               `json:"top_p,omitempty"`
 	Stream      bool                  `json:"stream,omitempty"`
-	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
+	System      interface{}           `json:"system,omitempty"`   // string or []SystemBlock
 	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"` // Anthropic extended thinking
 	Tools       []ClaudeTool          `json:"tools,omitempty"`
 	ToolChoice  interface{}           `json:"tool_choice,omitempty"`
