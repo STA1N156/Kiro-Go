@@ -41,17 +41,20 @@ type Account struct {
 	Nickname string `json:"nickname,omitempty"` // Display name for admin panel
 
 	// Authentication credentials
-	AccessToken  string `json:"accessToken"`            // OAuth access token for API calls
-	RefreshToken string `json:"refreshToken"`           // OAuth refresh token for token renewal
-	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
-	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
-	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC) or "social" (GitHub/Google)
-	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub")
-	Region       string `json:"region"`                 // AWS region for OIDC endpoints
-	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
-	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
-	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
-	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
+	AccessToken   string `json:"accessToken"`             // OAuth access token for API calls
+	RefreshToken  string `json:"refreshToken"`            // OAuth refresh token for token renewal
+	ClientID      string `json:"clientId,omitempty"`      // OIDC client ID (for IdC auth)
+	ClientSecret  string `json:"clientSecret,omitempty"`  // OIDC client secret (for IdC auth)
+	AuthMethod    string `json:"authMethod"`              // Authentication method: "idc" (AWS IdC) or "social" (GitHub/Google)
+	Provider      string `json:"provider,omitempty"`      // Identity provider name (e.g., "BuilderId", "GitHub")
+	IssuerURL     string `json:"issuerUrl,omitempty"`     // External IdP issuer URL (for enterprise auth)
+	TokenEndpoint string `json:"tokenEndpoint,omitempty"` // External IdP token endpoint (for refresh)
+	Scopes        string `json:"scopes,omitempty"`        // External IdP scopes used during auth/refresh
+	Region        string `json:"region"`                  // AWS region for OIDC endpoints
+	StartUrl      string `json:"startUrl,omitempty"`      // AWS SSO start URL
+	ExpiresAt     int64  `json:"expiresAt,omitempty"`     // Token expiration timestamp (Unix seconds)
+	MachineId     string `json:"machineId,omitempty"`     // UUID machine identifier for request tracking
+	ProfileArn    string `json:"profileArn,omitempty"`    // CodeWhisperer/Kiro profile ARN for generation requests
 
 	// Per-account outbound proxy (falls back to global ProxyURL if empty)
 	ProxyURL string `json:"proxyURL,omitempty"`

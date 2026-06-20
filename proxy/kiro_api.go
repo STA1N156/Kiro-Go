@@ -355,6 +355,9 @@ func listAvailableProfiles(account *config.Account) (string, error) {
 	}
 	setKiroHeaders(req, account)
 	req.Header.Set("Content-Type", "application/json")
+	if account != nil && account.AuthMethod == "external_idp" {
+		req.Header.Set("TokenType", "EXTERNAL_IDP")
+	}
 
 	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 	if err != nil {

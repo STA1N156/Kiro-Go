@@ -118,6 +118,42 @@ func TestResolveProfileArnFetchesAndCachesProfile(t *testing.T) {
 	}
 }
 
+func TestListAvailableProfilesMarksExternalIdpTokenType(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Init(configPath); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/ListAvailableProfiles" {
+				t.Fatalf("expected ListAvailableProfiles path, got %s", req.URL.Path)
+			}
+			if got := req.Header.Get("TokenType"); got != "EXTERNAL_IDP" {
+				t.Fatalf("expected TokenType EXTERNAL_IDP, got %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"profiles":[{"arn":"arn:aws:codewhisperer:profile/external"}]}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	got, err := listAvailableProfiles(&config.Account{
+		AccessToken: "external-access",
+		AuthMethod:  "external_idp",
+		Region:      "us-east-1",
+	})
+	if err != nil {
+		t.Fatalf("listAvailableProfiles: %v", err)
+	}
+	if got != "arn:aws:codewhisperer:profile/external" {
+		t.Fatalf("expected external profile ARN, got %q", got)
+	}
+}
+
 func TestResolveProfileArnSuppressesBuilderIDUnsupportedLookup(t *testing.T) {
 	clearProfileArnResolutionCooldowns()
 	t.Cleanup(clearProfileArnResolutionCooldowns)

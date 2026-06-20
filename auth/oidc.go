@@ -33,6 +33,9 @@ func RefreshToken(account *config.Account) (string, string, int64, string, error
 	if account.AuthMethod == "social" {
 		return refreshSocialToken(account.RefreshToken, client)
 	}
+	if account.AuthMethod == "external_idp" {
+		return refreshExternalIdpToken(account.RefreshToken, account.ClientID, account.TokenEndpoint, account.Scopes, client)
+	}
 	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
 }
 

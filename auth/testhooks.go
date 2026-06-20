@@ -28,3 +28,9 @@ func SetGlobalAuthClientForTest(c *http.Client) *http.Client {
 	}
 	return old
 }
+
+func resetExternalIdpSessionsForTest() {
+	externalIdpSessionsMu.Lock()
+	defer externalIdpSessionsMu.Unlock()
+	externalIdpSessions = make(map[string]*ExternalIdpSession)
+}

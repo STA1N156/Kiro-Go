@@ -21,16 +21,16 @@ const tokenRefreshSkewSeconds int64 = 120
 
 // RequestLog stores details about a single API request (success or failure).
 type RequestLog struct {
-	Time      int64  `json:"time"`      // Unix timestamp
-	Endpoint  string `json:"endpoint"`  // claude/openai/responses
-	Model     string `json:"model"`     // Requested model
-	AccountID string `json:"accountId"` // Account used
-	Status    string `json:"status"`    // "success" or "error"
-	Error     string `json:"error"`     // Error message (empty on success)
-	ErrorType string `json:"errorType"` // Error category (empty on success)
-	Tokens    int    `json:"tokens"`    // Total tokens (input+output, 0 on failure)
-	Credits   float64 `json:"credits"`  // Credits consumed (0 on failure)
-	Duration  int64  `json:"duration"`  // Request duration in ms
+	Time      int64   `json:"time"`      // Unix timestamp
+	Endpoint  string  `json:"endpoint"`  // claude/openai/responses
+	Model     string  `json:"model"`     // Requested model
+	AccountID string  `json:"accountId"` // Account used
+	Status    string  `json:"status"`    // "success" or "error"
+	Error     string  `json:"error"`     // Error message (empty on success)
+	ErrorType string  `json:"errorType"` // Error category (empty on success)
+	Tokens    int     `json:"tokens"`    // Total tokens (input+output, 0 on failure)
+	Credits   float64 `json:"credits"`   // Credits consumed (0 on failure)
+	Duration  int64   `json:"duration"`  // Request duration in ms
 }
 
 const requestLogsMaxSize = 500
@@ -2211,6 +2211,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiStartBuilderIdLogin(w, r)
 	case path == "/auth/builderid/poll" && r.Method == "POST":
 		h.apiPollBuilderIdAuth(w, r)
+	case path == "/auth/external-idp/start" && r.Method == "POST":
+		h.apiStartExternalIdp(w, r)
+	case path == "/auth/external-idp/complete" && r.Method == "POST":
+		h.apiCompleteExternalIdp(w, r)
 	case path == "/auth/sso-token" && r.Method == "POST":
 		h.apiImportSsoToken(w, r)
 	case path == "/auth/credentials" && r.Method == "POST":
@@ -2294,6 +2298,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"authMethod":        a.AuthMethod,
 			"provider":          a.Provider,
 			"region":            a.Region,
+			"profileArn":        a.ProfileArn,
 			"enabled":           a.Enabled,
 			"banStatus":         a.BanStatus,
 			"banReason":         a.BanReason,
@@ -2798,6 +2803,110 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"completed": true,
+		"account": map[string]interface{}{
+			"id":    account.ID,
+			"email": account.Email,
+		},
+	})
+}
+
+func (h *Handler) apiStartExternalIdp(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Region string `json:"region"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	session, err := auth.StartExternalIdpLogin(req.Region)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	expiresIn := int(time.Until(session.ExpiresAt).Seconds())
+	if expiresIn < 0 {
+		expiresIn = 0
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"sessionId": session.ID,
+		"signinUrl": session.SigninURL,
+		"expiresIn": expiresIn,
+	})
+}
+
+func (h *Handler) apiCompleteExternalIdp(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID   string `json:"sessionId"`
+		CallbackUrl string `json:"callbackUrl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.SessionID == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "sessionId is required"})
+		return
+	}
+	if req.CallbackUrl == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "callbackUrl is required"})
+		return
+	}
+
+	result, err := auth.CompleteExternalIdpLogin(req.SessionID, req.CallbackUrl)
+	if err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	if result.Status == auth.ExternalIdpStatusAuthorizationRequired {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"status":       result.Status,
+			"sessionId":    req.SessionID,
+			"authorizeUrl": result.AuthorizeURL,
+		})
+		return
+	}
+
+	if result.Region == "" {
+		result.Region = "us-east-1"
+	}
+	account := config.Account{
+		ID:            auth.GenerateAccountID(),
+		AccessToken:   result.AccessToken,
+		RefreshToken:  result.RefreshToken,
+		ClientID:      result.ClientID,
+		AuthMethod:    "external_idp",
+		Provider:      "ExternalIdP",
+		IssuerURL:     result.IssuerURL,
+		TokenEndpoint: result.TokenEndpoint,
+		Scopes:        result.Scopes,
+		Region:        result.Region,
+		ExpiresAt:     time.Now().Unix() + int64(result.ExpiresIn),
+		Enabled:       true,
+		MachineId:     config.GenerateMachineId(),
+		ProfileArn:    result.ProfileArn,
+	}
+
+	if err := config.AddAccount(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	h.pool.Reload()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"status":  result.Status,
 		"account": map[string]interface{}{
 			"id":    account.ID,
 			"email": account.Email,
@@ -3342,6 +3451,7 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"authMethod":        account.AuthMethod,
 		"provider":          account.Provider,
 		"region":            account.Region,
+		"profileArn":        account.ProfileArn,
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
 		"weight":            account.Weight,

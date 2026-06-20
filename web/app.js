@@ -22,6 +22,8 @@
   let builderIdSession = '';
   let builderIdPollTimer = null;
   let iamSession = '';
+  let externalIdpSession = '';
+  let externalIdpStage = '';
   let exportSelectedIds = new Set();
   let currentVersion = '';
   let testLogs = [];
@@ -2019,6 +2021,7 @@
   var METHOD_ICONS = {
     builderid: 'fa-solid fa-id-card',
     iam: 'fa-solid fa-key',
+    externalidp: 'fa-solid fa-building-shield',
     sso: 'fa-solid fa-shield-halved',
     local: 'fa-solid fa-folder-open',
     credentials: 'fa-solid fa-code',
@@ -2042,6 +2045,7 @@
     if (type === 'add') modalAdd(title, body);
     else if (type === 'builderid') modalBuilderId(title, body);
     else if (type === 'iam') modalIam(title, body);
+    else if (type === 'externalidp') modalExternalIdp(title, body);
     else if (type === 'sso') modalSso(title, body);
     else if (type === 'local') modalLocal(title, body);
     else if (type === 'credentials') modalCredentials(title, body);
@@ -2052,6 +2056,8 @@
   function closeModal() {
     closeDialog('addModal');
     iamSession = '';
+    externalIdpSession = '';
+    externalIdpStage = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
   }
@@ -2061,6 +2067,7 @@
       '<div class="method-list">' +
       methodCard('builderid', t('modal.builderIdTitle'), t('modal.builderIdDesc')) +
       methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
+      methodCard('externalidp', t('modal.externalIdpTitle'), t('modal.externalIdpDesc')) +
       methodCard('sso', t('modal.ssoTitle'), t('modal.ssoDesc')) +
       methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
@@ -2115,6 +2122,41 @@
       '<button class="btn btn-primary" id="iamBtn" type="button">' + escapeHtml(t('builderid.startLogin')) + '</button>' +
       '</div>';
     $('iamBtn').addEventListener('click', startIamSso);
+  }
+  function modalExternalIdp(title, body) {
+    externalIdpSession = '';
+    externalIdpStage = '';
+    title.textContent = t('modal.externalIdpTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.externalIdpDesc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="externalIdpRegion" value="us-east-1" /></div>' +
+      '<div id="externalIdpStep2" class="hidden">' +
+      '<div class="form-group"><label>' + escapeHtml(t('externalIdp.signinUrl')) + '</label>' +
+      '<div class="endpoint"><span id="externalIdpSigninUrl" class="font-mono text-xs"></span></div>' +
+      '<div class="flex gap-2 mt-2">' +
+      '<button class="btn btn-sm btn-outline flex-1" id="externalIdpSigninOpenBtn" type="button">' + escapeHtml(t('builderid.open')) + '</button>' +
+      '<button class="btn btn-sm btn-outline flex-1" id="externalIdpSigninCopyBtn" type="button">' + escapeHtml(t('common.copy')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<p class="text-sm mt-3 success-text">' + escapeHtml(t('externalIdp.pastePortalCallback')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('externalIdp.portalCallback')) + '</label><input type="text" id="externalIdpDescriptorCallback" placeholder="http://localhost:3128/signin/callback?..." /></div>' +
+      '</div>' +
+      '<div id="externalIdpStep3" class="hidden">' +
+      '<div class="form-group"><label>' + escapeHtml(t('externalIdp.authorizeUrl')) + '</label>' +
+      '<div class="endpoint"><span id="externalIdpAuthorizeUrl" class="font-mono text-xs"></span></div>' +
+      '<div class="flex gap-2 mt-2">' +
+      '<button class="btn btn-sm btn-outline flex-1" id="externalIdpAuthorizeOpenBtn" type="button">' + escapeHtml(t('builderid.open')) + '</button>' +
+      '<button class="btn btn-sm btn-outline flex-1" id="externalIdpAuthorizeCopyBtn" type="button">' + escapeHtml(t('common.copy')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<p class="text-sm mt-3 success-text">' + escapeHtml(t('externalIdp.pasteFinalCallback')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('externalIdp.finalCallback')) + '</label><input type="text" id="externalIdpCodeCallback" placeholder="http://localhost:3128/oauth/callback?code=..." /></div>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="externalIdpBtn" type="button">' + escapeHtml(t('builderid.startLogin')) + '</button>' +
+      '</div>';
+    $('externalIdpBtn').addEventListener('click', startExternalIdpLogin);
   }
   function modalSso(title, body) {
     title.textContent = t('modal.ssoTitle');
@@ -2459,6 +2501,68 @@
           await copyText($('iamAuthUrl').textContent);
           toast(t('common.copied'), 'primary');
         });
+      } else toastError(t('common.failed') + ': ' + (d.error || ''));
+    }
+  }
+  async function startExternalIdpLogin() {
+    if (!externalIdpSession) {
+      const res = await api('/auth/external-idp/start', {
+        method: 'POST', body: JSON.stringify({
+          region: $('externalIdpRegion').value || 'us-east-1'
+        })
+      });
+      const d = await res.json();
+      if (d.sessionId && d.signinUrl) {
+        externalIdpSession = d.sessionId;
+        externalIdpStage = 'descriptor';
+        $('externalIdpSigninUrl').textContent = d.signinUrl;
+        $('externalIdpStep2').classList.remove('hidden');
+        $('externalIdpBtn').textContent = t('externalIdp.next');
+        $('externalIdpSigninOpenBtn').addEventListener('click', () => window.open($('externalIdpSigninUrl').textContent, '_blank'));
+        $('externalIdpSigninCopyBtn').addEventListener('click', async () => {
+          await copyText($('externalIdpSigninUrl').textContent);
+          toast(t('common.copied'), 'primary');
+        });
+      } else toastError(t('common.failed') + ': ' + (d.error || ''));
+      return;
+    }
+
+    if (externalIdpStage === 'descriptor') {
+      const callbackUrl = $('externalIdpDescriptorCallback').value.trim();
+      if (!callbackUrl) return toastWarning(t('externalIdp.callbackMissing'));
+      const res = await api('/auth/external-idp/complete', {
+        method: 'POST', body: JSON.stringify({
+          sessionId: externalIdpSession, callbackUrl
+        })
+      });
+      const d = await res.json();
+      if (d.success && d.status === 'authorization_required' && d.authorizeUrl) {
+        externalIdpStage = 'code';
+        $('externalIdpAuthorizeUrl').textContent = d.authorizeUrl;
+        $('externalIdpStep3').classList.remove('hidden');
+        $('externalIdpBtn').textContent = t('externalIdp.complete');
+        $('externalIdpAuthorizeOpenBtn').addEventListener('click', () => window.open($('externalIdpAuthorizeUrl').textContent, '_blank'));
+        $('externalIdpAuthorizeCopyBtn').addEventListener('click', async () => {
+          await copyText($('externalIdpAuthorizeUrl').textContent);
+          toast(t('common.copied'), 'primary');
+        });
+      } else toastError(t('common.failed') + ': ' + (d.error || ''));
+      return;
+    }
+
+    if (externalIdpStage === 'code') {
+      const callbackUrl = $('externalIdpCodeCallback').value.trim();
+      if (!callbackUrl) return toastWarning(t('externalIdp.callbackMissing'));
+      const res = await api('/auth/external-idp/complete', {
+        method: 'POST', body: JSON.stringify({
+          sessionId: externalIdpSession, callbackUrl
+        })
+      });
+      const d = await res.json();
+      if (d.success && d.status === 'completed') {
+        closeModal(); loadAccounts(); loadStats();
+        toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
+        autoRefreshNewAccount(d.account?.id);
       } else toastError(t('common.failed') + ': ' + (d.error || ''));
     }
   }

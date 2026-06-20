@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"kiro-go/config"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -39,5 +40,18 @@ func TestBuildRuntimeHeaderValuesUsesRuntimeAPIFormat(t *testing.T) {
 	}
 	if !strings.Contains(values.UserAgent, "m/N,E") {
 		t.Fatalf("expected runtime mode marker in user agent, got %q", values.UserAgent)
+	}
+}
+
+func TestApplyKiroBaseHeadersMarksExternalIdpTokenType(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://q.us-east-1.amazonaws.com/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	applyKiroBaseHeaders(req, &config.Account{AuthMethod: "external_idp"}, kiroHeaderValues{})
+
+	if got := req.Header.Get("TokenType"); got != "EXTERNAL_IDP" {
+		t.Fatalf("expected external IdP token type header, got %q", got)
 	}
 }
