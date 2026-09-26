@@ -6,10 +6,163 @@ import (
 	accountpool "kiro-go/pool"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestStatsSaverFlushesOnTickAndClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Init(path); err != nil {
+		t.Fatal(err)
+	}
+	key, err := config.AddApiKey(config.ApiKeyEntry{Key: "sk-flush", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{stopStatsSaver: make(chan struct{}), stopRefresh: make(chan struct{}), statsSaverDone: make(chan struct{})}
+	go h.backgroundStatsSaver()
+	t.Cleanup(h.Close)
+	h.recordSuccessForApiKey(key.ID, 100, 20, 1)
+	readSaved := func() config.Config {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved config.Config
+		if err := json.Unmarshal(data, &saved); err != nil {
+			t.Fatal(err)
+		}
+		return saved
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for readSaved().TotalRequests == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if saved := readSaved(); saved.TotalRequests != 1 || saved.ApiKeys[0].TokensUsed != 120 {
+		t.Fatal("periodic batch not saved")
+	}
+	h.recordSuccessForApiKey(key.ID, 100, 20, 1)
+	h.Close()
+	if saved := readSaved(); saved.TotalRequests != 2 || saved.TotalTokens != 240 || saved.ApiKeys[0].TokensUsed != 240 {
+		t.Fatal("close did not flush final usage")
+	}
+}
+
+func TestNonStreamLongReplyAndReasoning(t *testing.T) {
+	const pieces = 512
+	textChunk, thoughtChunk := "正文内容🙂\n", "思考步骤。\n"
+	wantText, wantThought := strings.TrimSpace(strings.Repeat(textChunk, pieces)), strings.Repeat(thoughtChunk, pieces)
+	for _, protocol := range []string{"openai", "claude", "responses"} {
+		t.Run(protocol, func(t *testing.T) {
+			h, cleanup := setupResponsesTestHandler(t)
+			defer cleanup()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for i := 0; i < pieces; i++ {
+					w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": thoughtChunk}))
+					w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": textChunk}))
+				}
+			}))
+			defer server.Close()
+			defer swapKiroEndpointsForTest(t, server)()
+			body := `{"model":"claude-sonnet-4.5-thinking","max_tokens":20000,"messages":[{"role":"user","content":"hello"}],"thinking":{"type":"enabled","budget_tokens":10000}}`
+			if protocol == "responses" {
+				body = `{"model":"claude-sonnet-4.5-thinking","input":"hello","store":false}`
+			}
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("POST", "/", strings.NewReader(body))
+			var content, reasoning string
+			var outputTokens int
+			switch protocol {
+			case "openai":
+				h.handleOpenAIChat(w, r)
+				var response struct {
+					Choices []struct {
+						Message struct {
+							Content   string `json:"content"`
+							Reasoning string `json:"reasoning_content"`
+						} `json:"message"`
+					} `json:"choices"`
+					Usage struct {
+						OutputTokens int `json:"completion_tokens"`
+					} `json:"usage"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				if len(response.Choices) == 1 {
+					content, reasoning = response.Choices[0].Message.Content, response.Choices[0].Message.Reasoning
+				}
+				outputTokens = response.Usage.OutputTokens
+			case "claude":
+				h.handleClaudeMessages(w, r)
+				var response ClaudeResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				for _, block := range response.Content {
+					if block.Type == "text" {
+						content += block.Text
+					}
+					if block.Type == "thinking" {
+						reasoning += block.Thinking
+					}
+				}
+				outputTokens = response.Usage.OutputTokens
+			case "responses":
+				h.handleOpenAIResponses(w, r)
+				var response ResponsesObject
+				if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				for _, item := range response.Output {
+					for _, block := range item.Content {
+						content += block.Text
+					}
+				}
+				// Responses previously counted reasoning without including it in output.
+				outputTokens = response.Usage.OutputTokens
+			}
+			if w.Code != 200 || content != wantText || (protocol != "responses" && reasoning != wantThought) {
+				t.Fatalf("%s output mismatch: status=%d text=%d/%d reasoning=%d/%d", protocol, w.Code, len(content), len(wantText), len(reasoning), len(wantThought))
+			}
+			if want := estimateOpenAIOutputTokens(wantText, wantThought, nil); outputTokens != want {
+				t.Fatalf("usage changed: got %d want %d", outputTokens, want)
+			}
+		})
+	}
+}
+
+var longReplyBenchmarkResult string
+
+func BenchmarkLongReplyAssembly(b *testing.B) {
+	chunk := strings.Repeat("长回复。", 16)
+	const pieces = 1024
+	for _, mode := range []string{"concatenation", "builder"} {
+		b.Run(mode, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(chunk) * pieces))
+			for n := 0; n < b.N; n++ {
+				if mode == "builder" {
+					var out strings.Builder
+					for i := 0; i < pieces; i++ {
+						out.WriteString(chunk)
+					}
+					longReplyBenchmarkResult = out.String()
+				} else {
+					var out string
+					for i := 0; i < pieces; i++ {
+						out += chunk
+					}
+					longReplyBenchmarkResult = out
+				}
+			}
+		})
+	}
+}
 
 func TestThinkingSourceReasoningFirst(t *testing.T) {
 	var source thinkingStreamSource
@@ -87,7 +240,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	p.Reload()
 	h := &Handler{
 		pool:        p,
-		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+		promptCache: newPromptCacheTracker(),
 	}
 
 	payload := &KiroPayload{}

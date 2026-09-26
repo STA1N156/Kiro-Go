@@ -1582,8 +1582,31 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
+    $('localCacheEnabled').checked = d.localCache?.enabled !== false;
+    $('localCacheTTL').value = d.localCache?.ttlMinutes ?? 5;
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
+  }
+  async function saveLocalCacheConfig() {
+    const ttlMinutes = Number($('localCacheTTL').value);
+    if (!Number.isInteger(ttlMinutes) || ttlMinutes < 1 || ttlMinutes > 10080) {
+      toast(t('settings.localCacheTTLHint'), 'warning');
+      return;
+    }
+    const button = $('saveLocalCacheBtn');
+    button.disabled = true;
+    try {
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({
+        localCache: { enabled: $('localCacheEnabled').checked, ttlMinutes }
+      }) });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || t('common.saveFailed'));
+      toast(t('settings.localCacheSaved'), 'success');
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      button.disabled = false;
+    }
   }
   async function loadThinkingConfig() {
     const res = await api('/thinking');
@@ -3230,6 +3253,7 @@
   function bindSettingsEvents() {
     $('saveRequireApiKeyBtn').addEventListener('click', saveRequireApiKey);
     $('saveOverUsageBtn').addEventListener('click', saveOverUsageConfig);
+    $('saveLocalCacheBtn').addEventListener('click', saveLocalCacheConfig);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
     $('saveEndpointBtn').addEventListener('click', saveEndpointConfig);
     $('changePasswordBtn').addEventListener('click', changePassword);

@@ -118,7 +118,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		return acc
 	}
 
-		// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
+	// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
@@ -490,7 +490,9 @@ func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 		}
 	}
 	if updated {
-		go config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
+		// Memory-only update, ordered under the pool lock so older counters cannot
+		// overwrite newer ones or be lost during Reload. Disk writes are batched.
+		config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
 	}
 }
 

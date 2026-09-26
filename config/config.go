@@ -199,7 +199,9 @@ type Config struct {
 	// AllowOverUsage allows accounts to continue serving requests even when their
 	// usage quota has been exhausted. When enabled, the pool will not skip accounts
 	// solely because usageCurrent >= usageLimit.
-	AllowOverUsage bool `json:"allowOverUsage,omitempty"`
+	AllowOverUsage       bool  `json:"allowOverUsage,omitempty"`
+	LocalCacheEnabled    *bool `json:"localCacheEnabled,omitempty"`
+	LocalCacheTTLMinutes int   `json:"localCacheTTLMinutes,omitempty"`
 
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
@@ -270,14 +272,20 @@ var (
 // Init initializes the configuration system with the specified file path.
 // If the file doesn't exist, a default configuration is created.
 func Init(path string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
 	cfgPath = path
-	return Load()
+	return loadLocked()
 }
 
 func Load() error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	return loadLocked()
+}
 
+func loadLocked() error {
+	configRevision++ // Invalidate snapshots from a previous configuration.
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -290,6 +298,7 @@ func Load() error {
 				RequireApiKey: false,
 				Accounts:      []Account{},
 			}
+			statsRevision, savedStatsRevision = 0, 0
 			return saveLocked()
 		}
 		return err
@@ -300,6 +309,7 @@ func Load() error {
 		return err
 	}
 	cfg = &c
+	statsRevision, savedStatsRevision = 0, 0
 
 	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
 	// promote it into the new structure. The migrated entry inherits the legacy
@@ -358,14 +368,23 @@ func newUUID() string {
 	return GenerateMachineId()
 }
 
-// Save persists the current configuration to the JSON file.
-// Uses indented formatting for human readability.
+// Save atomically persists configuration. Caller MUST hold cfgLock.
 func Save() error {
+	configRevision++ // A background snapshot must never overwrite a settings save.
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfgPath, data, 0600)
+	tmp, err := writeConfigTemp(cfgPath, data)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	if err := replaceConfigFile(tmp, cfgPath); err != nil {
+		return err
+	}
+	savedStatsRevision = statsRevision
+	return nil
 }
 
 // SetPassword updates the admin password.
@@ -701,6 +720,9 @@ func UpdateAccount(id string, account Account) error {
 			account.TokenEndpoint = a.TokenEndpoint
 			account.IssuerURL = a.IssuerURL
 			account.Scopes = a.Scopes
+			// Administrative snapshots must not roll back live usage counters.
+			account.RequestCount, account.ErrorCount = a.RequestCount, a.ErrorCount
+			account.TotalTokens, account.TotalCredits, account.LastUsed = a.TotalTokens, a.TotalCredits, a.LastUsed
 			if account.RefreshTokenFingerprint == "" {
 				account.RefreshTokenFingerprint = RefreshTokenFingerprint(a.RefreshToken)
 			}
@@ -918,17 +940,6 @@ func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string) e
 	return Save()
 }
 
-func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits float64) error {
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	cfg.TotalRequests = totalReq
-	cfg.SuccessRequests = successReq
-	cfg.FailedRequests = failedReq
-	cfg.TotalTokens = totalTokens
-	cfg.TotalCredits = totalCredits
-	return Save()
-}
-
 func GetStats() (int, int, int, int, float64) {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
@@ -945,7 +956,8 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, to
 			cfg.Accounts[i].TotalTokens = totalTokens
 			cfg.Accounts[i].TotalCredits = totalCredits
 			cfg.Accounts[i].LastUsed = lastUsed
-			return Save()
+			statsRevision++
+			return nil
 		}
 	}
 	return nil

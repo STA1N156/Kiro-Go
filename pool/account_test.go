@@ -4,9 +4,51 @@ import (
 	"errors"
 	"kiro-go/config"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestConcurrentUsageSurvivesPoolReload(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.AddAccount(config.Account{ID: "batched", Enabled: true, Weight: 3, AccessToken: "fake"}); err != nil {
+		t.Fatal(err)
+	}
+	p := &AccountPool{}
+	p.Reload()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				p.UpdateStats("batched", 10, 0.5)
+				p.Reload()
+			}
+		}()
+	}
+	wg.Wait()
+	for _, a := range p.GetAllAccounts() {
+		if a.RequestCount != 400 || a.TotalTokens != 4000 || a.TotalCredits != 200 {
+			t.Fatalf("pool counter lost: %+v", a)
+		}
+	}
+	a := config.GetAccounts()[0]
+	if a.RequestCount != 400 || a.TotalTokens != 4000 || a.TotalCredits != 200 {
+		t.Fatalf("config counter lost: %+v", a)
+	}
+	if err := config.UpdateStats(400, 400, 0, 4000, 200); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if config.GetAccounts()[0].TotalTokens != 4000 {
+		t.Fatal("batched stats did not persist")
+	}
+}
 
 func TestOverLimitAccountsAreSkippedByDefault(t *testing.T) {
 	p := &AccountPool{}

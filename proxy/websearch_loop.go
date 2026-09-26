@@ -34,6 +34,7 @@ type webSearchRoundOutcome struct {
 
 // runWebSearchLoop is the mixed-tools entry point.
 func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, thinking bool, estimatedInputTokens int, apiKeyID string) {
+	cacheProfile := h.promptCache.BuildClaudeProfile(req)
 	// Working copy of messages we will mutate as we feed search results back.
 	working := *req
 	working.Messages = append([]ClaudeMessage(nil), req.Messages...)
@@ -129,11 +130,12 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, totalCredits)
 		h.recordSuccessLog("claude", req.Model, lastAccountID, inputTokens+outputTokens, totalCredits, time.Since(reqStart).Milliseconds())
 
+		cacheUsage := h.promptCache.finish(cacheProfile, inputTokens)
 		if req.Stream {
-			h.renderWebSearchLoopSSE(w, req.Model, content, stopReason, inputTokens, outputTokens)
+			h.renderWebSearchLoopSSE(w, req.Model, content, stopReason, inputTokens, outputTokens, cacheUsage)
 			return
 		}
-		h.renderWebSearchLoopJSON(w, req.Model, content, stopReason, inputTokens, outputTokens)
+		h.renderWebSearchLoopJSON(w, req.Model, content, stopReason, inputTokens, outputTokens, cacheUsage)
 		return
 	}
 
@@ -158,7 +160,7 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 			continue
 		}
 
-		var text string
+		var text strings.Builder
 		var toolUses []KiroToolUse
 		var inputTokens int
 		var credits float64
@@ -170,7 +172,7 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 				if isThinking {
 					return
 				}
-				text += t
+				text.WriteString(t)
 			},
 			OnToolUse: func(tu KiroToolUse) {
 				toolUses = append(toolUses, tu)
@@ -210,7 +212,7 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 		}
 
 		return &webSearchRoundOutcome{
-			text:               text,
+			text:               text.String(),
 			toolUses:           toolUses,
 			inputTokens:        inputTokens,
 			credits:            credits,
@@ -434,6 +436,7 @@ func (h *Handler) renderWebSearchLoopJSON(
 	content []map[string]interface{},
 	stopReason string,
 	inputTokens, outputTokens int,
+	cacheUsage promptCacheUsage,
 ) {
 	messageID := "msg_" + strings.ReplaceAll(uuid.New().String(), "-", "")
 	if len(messageID) > 4+24 {
@@ -447,12 +450,7 @@ func (h *Handler) renderWebSearchLoopJSON(
 		"content":       content,
 		"stop_reason":   stopReason,
 		"stop_sequence": nil,
-		"usage": map[string]interface{}{
-			"input_tokens":                inputTokens,
-			"output_tokens":               outputTokens,
-			"cache_creation_input_tokens": 0,
-			"cache_read_input_tokens":     0,
-		},
+		"usage":         buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, true),
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -464,6 +462,7 @@ func (h *Handler) renderWebSearchLoopSSE(
 	content []map[string]interface{},
 	stopReason string,
 	inputTokens, outputTokens int,
+	cacheUsage promptCacheUsage,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -490,12 +489,7 @@ func (h *Handler) renderWebSearchLoopSSE(
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage": map[string]interface{}{
-				"input_tokens":                inputTokens,
-				"output_tokens":               0,
-				"cache_creation_input_tokens": 0,
-				"cache_read_input_tokens":     0,
-			},
+			"usage":         buildClaudeUsageMap(inputTokens, 0, cacheUsage, true),
 		},
 	})
 

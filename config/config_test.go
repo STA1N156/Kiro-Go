@@ -1,11 +1,170 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestUsageBatchedPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatal(err)
+	}
+	key, err := AddApiKey(ApiKeyEntry{Key: "sk-batched", Enabled: true, TokenLimit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AddAccount(Account{ID: "account", AccessToken: "fake", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleAccount := GetAccounts()[0]
+	if err := RecordApiKeyUsage(key.ID, 100, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateAccountStats("account", 1, 0, 100, 1, 123); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("per-request usage wrote to disk")
+	}
+	if over, _ := ApiKeyOverLimit(*GetApiKeyEntry(key.ID)); !over {
+		t.Fatal("quota must update before disk flush")
+	}
+	if err := UpdateStats(1, 1, 0, 100, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := GetApiKeyEntry(key.ID); got.TokensUsed != 100 || got.RequestsCount != 1 {
+		t.Fatalf("key usage lost: %+v", got)
+	}
+	if got := GetAccounts()[0]; got.TotalTokens != 100 || got.RequestCount != 1 {
+		t.Fatalf("account usage lost: %+v", got)
+	}
+	if n, _, _, tokens, _ := GetStats(); n != 1 || tokens != 100 {
+		t.Fatal("global usage lost")
+	}
+	revision := configRevision
+	if err := UpdateStats(1, 1, 0, 100, 1); err != nil {
+		t.Fatal(err)
+	}
+	if configRevision != revision {
+		t.Fatal("idle flush rewrote config")
+	}
+	staleAccount.Nickname = "renamed"
+	if err := UpdateAccount("account", staleAccount); err != nil {
+		t.Fatal(err)
+	}
+	if GetAccounts()[0].TotalTokens != 100 {
+		t.Fatal("administrative snapshot rolled back live usage")
+	}
+}
+
+func TestUsageSnapshotPreservesNewUsageAndSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatal(err)
+	}
+	key, err := AddApiKey(ApiKeyEntry{Key: "sk-snapshot", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordApiKeyUsage(key.ID, 100, 1); err != nil {
+		t.Fatal(err)
+	}
+	makeSnapshot := func() (string, uint64, uint64) {
+		t.Helper()
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmp, err := writeConfigTemp(path, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Remove(tmp) })
+		return tmp, configRevision, statsRevision
+	}
+	tmp, revision, usageRevision := makeSnapshot()
+	if err := RecordApiKeyUsage(key.ID, 200, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitStatsSnapshot(tmp, path, revision, usageRevision); err != nil {
+		t.Fatal(err)
+	}
+	if savedStatsRevision == statsRevision {
+		t.Fatal("usage arriving during disk write was marked saved")
+	}
+	if err := UpdateStats(2, 2, 0, 300, 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if GetApiKeyEntry(key.ID).TokensUsed != 300 {
+		t.Fatal("new usage lost")
+	}
+
+	tmp, revision, usageRevision = makeSnapshot()
+	if err := ResetApiKeyUsage(key.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSettingsPatch(nil, nil, "new-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitStatsSnapshot(tmp, path, revision, usageRevision); err != nil {
+		t.Fatal(err)
+	}
+	if err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if GetApiKeyEntry(key.ID).TokensUsed != 0 || cfg.Password != "new-password" {
+		t.Fatal("old snapshot overwrote reset/settings")
+	}
+}
+
+func TestUsageFlushFailureIsRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatal(err)
+	}
+	key, err := AddApiKey(ApiKeyEntry{Key: "sk-retry", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordApiKeyUsage(key.ID, 100, 1); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath = filepath.Join(t.TempDir(), "missing", "config.json")
+	if err := UpdateStats(1, 1, 0, 100, 1); err == nil {
+		t.Fatal("expected write failure")
+	}
+	if savedStatsRevision == statsRevision {
+		t.Fatal("failed write marked saved")
+	}
+	cfgPath = path
+	if err := UpdateStats(1, 1, 0, 100, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if GetApiKeyEntry(key.ID).TokensUsed != 100 {
+		t.Fatal("retry lost usage")
+	}
+}
 
 func TestNormalizeAPIKeyAccountPipeRegionAndMachineId(t *testing.T) {
 	account := Account{

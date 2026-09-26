@@ -108,6 +108,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	openaiReq.Model = actualModel
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
+	cacheProfile := h.promptCache.BuildOpenAIProfile(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
@@ -115,18 +116,19 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	if req.Stream {
 		h.handleResponsesStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-			apiKeyID, respID, &req, storedInputCopy, storeResponse)
+			apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
 		return
 	}
 
 	h.handleResponsesNonStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-		apiKeyID, respID, &req, storedInputCopy, storeResponse)
+		apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
 }
 
 func (h *Handler) handleResponsesNonStream(
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	cacheProfile *promptCacheProfile,
 ) {
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -144,7 +146,7 @@ func (h *Handler) handleResponsesNonStream(
 			continue
 		}
 
-		var content, reasoningContent string
+		var content, reasoning strings.Builder
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
 		var credits float64
@@ -153,9 +155,9 @@ func (h *Handler) handleResponsesNonStream(
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
 				if isThinking {
-					reasoningContent += text
+					reasoning.WriteString(text)
 				} else {
-					content += text
+					content.WriteString(text)
 				}
 			},
 			OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
@@ -174,7 +176,8 @@ func (h *Handler) handleResponsesNonStream(
 			continue
 		}
 
-		finalContent, _ := extractThinkingFromContent(content)
+		finalContent, _ := extractThinkingFromContent(content.String())
+		reasoningContent := reasoning.String()
 		if !thinking {
 			reasoningContent = ""
 		}
@@ -192,6 +195,9 @@ func (h *Handler) handleResponsesNonStream(
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
+		if cacheProfile != nil {
+			respObj.Usage.InputTokensDetails = &cachedTokenDetails{h.promptCache.finish(cacheProfile, inputTokens).CacheReadInputTokens}
+		}
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
 
@@ -275,6 +281,7 @@ func (h *Handler) handleResponsesStream(
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	cacheProfile *promptCacheProfile,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -539,6 +546,9 @@ func (h *Handler) handleResponsesStream(
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
+		if cacheProfile != nil {
+			respObj.Usage.InputTokensDetails = &cachedTokenDetails{h.promptCache.finish(cacheProfile, inputTokens).CacheReadInputTokens}
+		}
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions

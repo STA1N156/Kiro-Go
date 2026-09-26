@@ -275,6 +275,24 @@
           <button class="btn btn-primary" id="saveOverUsageBtn" data-i18n="settings.saveUsage"></button>
         </div>
 
+        <!-- Local prefix cache -->
+        <div class="card">
+          <div class="card-header"><span class="card-title" data-i18n="settings.localCache"></span></div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="localCacheEnabled" /><span class="slider"></span></span>
+              <span data-i18n="settings.localCacheEnabled"></span>
+            </label>
+            <small data-i18n="settings.localCacheHint"></small>
+          </div>
+          <div class="form-group">
+            <label for="localCacheTTL" data-i18n="settings.localCacheTTL"></label>
+            <input type="number" id="localCacheTTL" min="1" max="10080" step="1" value="5" />
+            <small data-i18n="settings.localCacheTTLHint"></small>
+          </div>
+          <button class="btn btn-primary" id="saveLocalCacheBtn" data-i18n="settings.saveLocalCache"></button>
+        </div>
+
         <!-- Thinking settings -->
         <div class="card">
           <div class="card-header"><span class="card-title" data-i18n="settings.thinkingSettings"></span></div>

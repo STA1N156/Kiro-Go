@@ -11,6 +11,7 @@ import (
 	"kiro-go/logger"
 	"kiro-go/pool"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -73,6 +74,9 @@ type Handler struct {
 	startTime       int64
 	stopRefresh     chan struct{}
 	stopStatsSaver  chan struct{}
+	statsSaverDone  chan struct{}
+	statsSaveMu     sync.Mutex
+	stopOnce        sync.Once
 	// 模型缓存
 	cachedModels       []ModelInfo
 	modelsCacheMu      sync.RWMutex
@@ -289,14 +293,20 @@ func NewHandler() *Handler {
 		startTime:            time.Now().Unix(),
 		stopRefresh:          make(chan struct{}),
 		stopStatsSaver:       make(chan struct{}),
-		promptCache:          newPromptCacheTracker(defaultPromptCacheTTL),
+		statsSaverDone:       make(chan struct{}),
+		promptCache:          newPromptCacheTracker(),
 		microsoftSelections:  make(map[string]*microsoftProfileSelection),
 		microsoftCanceled:    make(map[string]time.Time),
 		microsoftDiscoveries: make(map[string]*microsoftProfileDiscovery),
 	}
 	// 启动后台刷新
+	cachePath := filepath.Join(config.GetConfigDir(), "prompt-cache.bin")
+	if err := h.promptCache.loadIndex(cachePath); err != nil {
+		logger.Warnf("[PromptCache] load failed: %v", err)
+	}
+	go h.promptCache.persistIndex(cachePath, h.stopStatsSaver)
 	go h.backgroundRefresh()
-	// 启动后台统计保存 (每30秒保存一次)
+	// 启动后台统计合并保存
 	go h.backgroundStatsSaver()
 	// 清理过期的 stored responses（>30 天）
 	go purgeExpiredResponses(responsesDefaultTTL)
@@ -309,7 +319,13 @@ func (h *Handler) backgroundRefresh() {
 	defer ticker.Stop()
 
 	// 启动时延迟 10 秒后执行一次
-	time.Sleep(10 * time.Second)
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-h.stopRefresh:
+		return
+	}
 	h.refreshModelsCache()
 	h.refreshAllAccounts()
 
@@ -872,7 +888,6 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
-	cacheProfile := h.promptCache.BuildClaudeProfile(effectiveReq, estimatedInputTokens)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 
@@ -891,6 +906,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	}
 
 	// 转换请求
+	cacheProfile := h.promptCache.BuildClaudeProfile(effectiveReq)
 	kiroPayload := ClaudeToKiro(&req, thinking)
 
 	// Stream or non-stream
@@ -922,7 +938,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	excluded := make(map[string]bool)
 	var lastErr error
 	messageStarted := false
-	var messageStartUsage promptCacheUsage
 
 	ensureMessageStart := func() {
 		if messageStarted {
@@ -938,7 +953,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				"model":         model,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
-				"usage":         buildClaudeUsageMap(startInputTokens, 0, messageStartUsage, cacheProfile != nil),
+				"usage":         buildClaudeUsageMap(startInputTokens, 0, promptCacheUsage{}, cacheProfile != nil),
 			},
 		})
 		messageStarted = true
@@ -955,8 +970,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			h.handleAccountFailure(account, err)
 			continue
 		}
-		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
-		messageStartUsage = cacheUsage
 
 		var inputTokens, outputTokens int
 		var credits float64
@@ -1313,7 +1326,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		h.promptCache.Update(account.ID, cacheProfile)
+		cacheUsage := h.promptCache.finish(cacheProfile, inputTokens)
 		h.recordSuccessLog("claude", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		stopReason := "end_turn"
@@ -1353,7 +1366,8 @@ func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event str
 
 // backgroundStatsSaver 后台定时保存统计数据
 func (h *Handler) backgroundStatsSaver() {
-	ticker := time.NewTicker(30 * time.Second)
+	defer close(h.statsSaverDone)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -1367,15 +1381,29 @@ func (h *Handler) backgroundStatsSaver() {
 	}
 }
 
+// Close stops background work and waits for the final usage flush.
+// Call after HTTP requests have drained.
+func (h *Handler) Close() {
+	h.stopOnce.Do(func() {
+		close(h.stopRefresh)
+		close(h.stopStatsSaver)
+	})
+	<-h.statsSaverDone
+}
+
 // saveStats 保存统计到配置文件
 func (h *Handler) saveStats() {
-	config.UpdateStats(
+	h.statsSaveMu.Lock()
+	defer h.statsSaveMu.Unlock()
+	if err := config.UpdateStats(
 		int(atomic.LoadInt64(&h.totalRequests)),
 		int(atomic.LoadInt64(&h.successRequests)),
 		int(atomic.LoadInt64(&h.failedRequests)),
 		int(atomic.LoadInt64(&h.totalTokens)),
 		h.getCredits(),
-	)
+	); err != nil {
+		logger.Warnf("[Stats] save failed, will retry: %v", err)
+	}
 }
 
 // getCredits 线程安全获取 credits
@@ -1402,7 +1430,7 @@ func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) 
 
 // recordSuccessForApiKey is recordSuccess + per-API-key usage attribution.
 // When apiKeyID is empty (legacy single-key path or unauthenticated path), only the
-// global counters are updated. Persistence errors are logged but do not propagate.
+// global counters are updated. Disk persistence is handled by backgroundStatsSaver.
 func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTokens int, credits float64) {
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	if apiKeyID == "" {
@@ -1515,10 +1543,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			h.handleAccountFailure(account, err)
 			continue
 		}
-		cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
 
-		var content string
-		var thinkingContent string
+		var content, thinkingContent strings.Builder
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
 		var credits float64
@@ -1527,9 +1553,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
 				if isThinking {
-					thinkingContent += text
+					thinkingContent.WriteString(text)
 				} else {
-					content += text
+					content.WriteString(text)
 				}
 			},
 			OnToolUse: func(tu KiroToolUse) {
@@ -1556,8 +1582,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		thinkingFormat := thinkingOpts.Format
-		finalContent, extractedReasoning := extractThinkingFromContent(content)
-		rawThinkingContent := thinkingContent
+		finalContent, extractedReasoning := extractThinkingFromContent(content.String())
+		rawThinkingContent := thinkingContent.String()
 		if thinking && rawThinkingContent == "" && extractedReasoning != "" {
 			rawThinkingContent = extractedReasoning
 		}
@@ -1575,7 +1601,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		h.promptCache.Update(account.ID, cacheProfile)
+		cacheUsage := h.promptCache.finish(cacheProfile, inputTokens)
 		h.recordSuccessLog("claude", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		responseThinkingContent := rawThinkingContent
@@ -1598,14 +1624,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 
 		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
 		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
-		resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
 		resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
-		if cacheProfile != nil {
-			resp.Usage.CacheCreation = &ClaudeCacheCreationUsage{
-				Ephemeral5mInputTokens: cacheUsage.CacheCreation5mInputTokens,
-				Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,
-			}
-		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(resp)
 		return
@@ -1660,19 +1679,20 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
+	cacheProfile := h.promptCache.BuildOpenAIProfile(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
-		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID, cacheProfile)
 	} else {
-		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID, cacheProfile)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string, cacheProfile *promptCacheProfile) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -2040,11 +2060,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				"delta":         map[string]interface{}{},
 				"finish_reason": finishReason,
 			}},
-			"usage": map[string]int{
-				"prompt_tokens":     inputTokens,
-				"completion_tokens": outputTokens,
-				"total_tokens":      inputTokens + outputTokens,
-			},
+			"usage": h.promptCache.openAIUsage(cacheProfile, inputTokens, outputTokens),
 		}
 		data, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", string(data))
@@ -2063,7 +2079,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string, cacheProfile *promptCacheProfile) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	reqStart := time.Now()
@@ -2080,8 +2096,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			continue
 		}
 
-		var content string
-		var reasoningContent string
+		var content, reasoning strings.Builder
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
 		var credits float64
@@ -2090,9 +2105,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
 				if isThinking {
-					reasoningContent += text
+					reasoning.WriteString(text)
 				} else {
-					content += text
+					content.WriteString(text)
 				}
 			},
 			OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
@@ -2111,7 +2126,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			continue
 		}
 
-		finalContent, extractedReasoning := extractThinkingFromContent(content)
+		finalContent, extractedReasoning := extractThinkingFromContent(content.String())
+		reasoningContent := reasoning.String()
 		if thinking && reasoningContent == "" && extractedReasoning != "" {
 			reasoningContent = extractedReasoning
 		} else if !thinking {
@@ -2132,6 +2148,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
+		resp["usage"] = h.promptCache.openAIUsage(cacheProfile, inputTokens, outputTokens)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(resp)
 		return
@@ -3866,6 +3883,7 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 		"port":           config.GetPort(),
 		"host":           config.GetHost(),
 		"allowOverUsage": config.GetAllowOverUsage(),
+		"localCache":     config.GetLocalCacheSettings(),
 	})
 }
 
@@ -3914,10 +3932,11 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey         *string `json:"apiKey,omitempty"`
-		RequireApiKey  *bool   `json:"requireApiKey,omitempty"`
-		Password       string  `json:"password,omitempty"`
-		AllowOverUsage *bool   `json:"allowOverUsage,omitempty"`
+		ApiKey         *string                    `json:"apiKey,omitempty"`
+		RequireApiKey  *bool                      `json:"requireApiKey,omitempty"`
+		Password       string                     `json:"password,omitempty"`
+		AllowOverUsage *bool                      `json:"allowOverUsage,omitempty"`
+		LocalCache     *config.LocalCacheSettings `json:"localCache,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3925,6 +3944,18 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.LocalCache != nil {
+		if req.LocalCache.TTLMinutes < 1 || req.LocalCache.TTLMinutes > 10080 {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Cache duration must be 1–10080 minutes"})
+			return
+		}
+		if err := config.UpdateLocalCacheSettings(*req.LocalCache); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	if err := config.UpdateSettingsPatch(req.ApiKey, req.RequireApiKey, req.Password); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3957,6 +3988,8 @@ func (h *Handler) apiGetStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiResetStats(w http.ResponseWriter, r *http.Request) {
+	h.statsSaveMu.Lock()
+	defer h.statsSaveMu.Unlock()
 	atomic.StoreInt64(&h.totalRequests, 0)
 	atomic.StoreInt64(&h.successRequests, 0)
 	atomic.StoreInt64(&h.failedRequests, 0)
@@ -3964,7 +3997,11 @@ func (h *Handler) apiResetStats(w http.ResponseWriter, r *http.Request) {
 	h.creditsMu.Lock()
 	h.totalCredits = 0
 	h.creditsMu.Unlock()
-	config.UpdateStats(0, 0, 0, 0, 0)
+	if err := config.UpdateStats(0, 0, 0, 0, 0); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save statistics reset"})
+		return
+	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
@@ -4030,9 +4067,9 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	}
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 
-	var content string
+	var content strings.Builder
 	callback := &KiroStreamCallback{
-		OnText:         func(text string, isThinking bool) { content += text },
+		OnText:         func(text string, isThinking bool) { content.WriteString(text) },
 		OnToolUse:      func(tu KiroToolUse) {},
 		OnComplete:     func(inTok, outTok int) {},
 		OnError:        func(err error) {},
@@ -4049,7 +4086,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"reply":   content,
+		"reply":   content.String(),
 		"model":   req.Model,
 	})
 }

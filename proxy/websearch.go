@@ -503,6 +503,7 @@ func buildWebSearchContentBlocks(query, toolUseID string, results *WebSearchResu
 
 // handleWebSearchRequest serves pure native web_search requests via MCP.
 func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeRequest, estimatedInputTokens int, apiKeyID string) {
+	cacheProfile := h.promptCache.BuildClaudeProfile(req)
 	query := extractSearchQuery(req)
 	if query == "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Unable to extract search query from message")
@@ -552,8 +553,9 @@ func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeReque
 	h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, 0)
 	h.recordSuccessLog("claude", req.Model, accountID, inputTokens+outputTokens, 0, time.Since(reqStart).Milliseconds())
 
+	cacheUsage := h.promptCache.finish(cacheProfile, inputTokens)
 	if req.Stream {
-		h.streamWebSearchSSE(w, req.Model, query, toolUseID, results, inputTokens, outputTokens)
+		h.streamWebSearchSSE(w, req.Model, query, toolUseID, results, inputTokens, outputTokens, cacheUsage)
 		return
 	}
 
@@ -572,10 +574,10 @@ func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeReque
 		"stop_reason":   "end_turn",
 		"stop_sequence": nil,
 		"usage": map[string]interface{}{
-			"input_tokens":                inputTokens,
+			"input_tokens":                billedClaudeInputTokens(inputTokens, cacheUsage),
 			"output_tokens":               outputTokens,
 			"cache_creation_input_tokens": 0,
-			"cache_read_input_tokens":     0,
+			"cache_read_input_tokens":     cacheUsage.CacheReadInputTokens,
 			"server_tool_use": map[string]interface{}{
 				"web_search_requests": 1,
 			},
@@ -591,6 +593,7 @@ func (h *Handler) streamWebSearchSSE(
 	model, query, toolUseID string,
 	results *WebSearchResults,
 	inputTokens, outputTokens int,
+	cacheUsage promptCacheUsage,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -619,10 +622,10 @@ func (h *Handler) streamWebSearchSSE(
 			"stop_reason":   nil,
 			"stop_sequence": nil,
 			"usage": map[string]interface{}{
-				"input_tokens":                inputTokens,
+				"input_tokens":                billedClaudeInputTokens(inputTokens, cacheUsage),
 				"output_tokens":               0,
 				"cache_creation_input_tokens": 0,
-				"cache_read_input_tokens":     0,
+				"cache_read_input_tokens":     cacheUsage.CacheReadInputTokens,
 			},
 		},
 	})
