@@ -117,14 +117,6 @@ const (
 	thinkingSourceTagBlock
 )
 
-func allowReasoningSource(source *thinkingStreamSource) bool {
-	if *source == thinkingSourceTagBlock {
-		return false
-	}
-	*source = thinkingSourceReasoningEvent
-	return true
-}
-
 func allowTagSource(source *thinkingStreamSource) bool {
 	if *source == thinkingSourceReasoningEvent {
 		return false
@@ -214,8 +206,7 @@ func validateClaudeThinkingConfig(thinking *ClaudeThinkingConfig, maxTokens int)
 }
 
 type claudeThinkingResponseOptions struct {
-	Format      string
-	OmitDisplay bool
+	Format string
 }
 
 func resolveClaudeThinkingResponseOptions(thinking *ClaudeThinkingConfig, defaultFormat string) claudeThinkingResponseOptions {
@@ -229,11 +220,8 @@ func resolveClaudeThinkingResponseOptions(thinking *ClaudeThinkingConfig, defaul
 
 	display := strings.ToLower(strings.TrimSpace(thinking.Display))
 	switch display {
-	case "summarized":
+	case "summarized", "omitted":
 		opts.Format = "thinking"
-	case "omitted":
-		opts.Format = "thinking"
-		opts.OmitDisplay = true
 	}
 
 	return opts
@@ -840,11 +828,10 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	actualModel, _ := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
-	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 
-	estimatedTokens := estimateClaudeRequestInputTokens(effectiveReq)
+	estimatedTokens := estimateClaudeRequestInputTokens(&req)
 	if estimatedTokens < 1 {
 		estimatedTokens = 1
 	}
@@ -883,11 +870,10 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
-	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
-	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
+	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 
@@ -906,19 +892,19 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	}
 
 	// 转换请求
-	cacheProfile := h.promptCache.BuildClaudeProfile(effectiveReq)
+	cacheProfile := h.promptCache.BuildClaudeProfile(&req)
 	kiroPayload := ClaudeToKiro(&req, thinking)
 
 	// Stream or non-stream
 	if req.Stream {
-		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeStream(w, kiroPayload, req.Model, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	} else {
-		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1048,10 +1034,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				return
 			}
 
-			if !thinking {
-				return
-			}
-
 			switch thinkingFormat {
 			case "think":
 				var outputText string
@@ -1083,19 +1065,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					"delta": map[string]string{"type": "text_delta", "text": text},
 				})
 			default:
-				if thinkingOpts.OmitDisplay {
-					if thinkingState == 1 {
-						startContentBlock("thinking")
-						return
-					}
-					if thinkingState == 3 {
-						if activeBlockType != "thinking" {
-							startContentBlock("thinking")
-						}
-						closeActiveBlock()
-					}
-					return
-				}
 				if thinkingState == 3 && text == "" {
 					if activeBlockType == "thinking" {
 						closeActiveBlock()
@@ -1117,14 +1086,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		processClaudeText := func(text string, isThinking bool, forceFlush bool) {
-			if isThinking && !thinking {
-				return
-			}
-
 			if isThinking {
-				if !allowReasoningSource(&thinkingSource) {
-					return
-				}
+				thinkingSource = thinkingSourceReasoningEvent
 				if !thinkingStarted {
 					sendText(text, 1)
 					thinkingStarted = true
@@ -1315,11 +1278,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
 		thinkingOutput := rawThinkingBuilder.String()
-		if thinking && thinkingOutput == "" && extractedReasoning != "" {
+		if thinkingOutput == "" && extractedReasoning != "" {
 			thinkingOutput = extractedReasoning
-		}
-		if !thinking {
-			thinkingOutput = ""
 		}
 		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 
@@ -1527,7 +1487,7 @@ func (h *Handler) getRequestLogs() []RequestLog {
 }
 
 // handleClaudeNonStream Claude 非流式响应
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	reqStart := time.Now()
@@ -1584,11 +1544,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		thinkingFormat := thinkingOpts.Format
 		finalContent, extractedReasoning := extractThinkingFromContent(content.String())
 		rawThinkingContent := thinkingContent.String()
-		if thinking && rawThinkingContent == "" && extractedReasoning != "" {
+		if rawThinkingContent == "" && extractedReasoning != "" {
 			rawThinkingContent = extractedReasoning
-		}
-		if !thinking {
-			rawThinkingContent = ""
 		}
 
 		if realInputTokens > 0 {
@@ -1605,12 +1562,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		h.recordSuccessLog("claude", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		responseThinkingContent := rawThinkingContent
-		includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
-		if includeEmptyThinkingBlock {
-			responseThinkingContent = ""
-		}
-
-		if thinking && responseThinkingContent != "" {
+		if responseThinkingContent != "" {
 			switch thinkingFormat {
 			case "think":
 				finalContent = "<think>" + responseThinkingContent + "</think>" + finalContent
@@ -1622,7 +1574,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			}
 		}
 
-		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
+		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, false, toolUses, inputTokens, outputTokens, model)
 		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 		resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1685,14 +1637,14 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
-		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID, cacheProfile)
+		h.handleOpenAIStream(w, kiroPayload, req.Model, estimatedInputTokens, apiKeyID, cacheProfile)
 	} else {
-		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID, cacheProfile)
+		h.handleOpenAINonStream(w, kiroPayload, req.Model, estimatedInputTokens, apiKeyID, cacheProfile)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string, cacheProfile *promptCacheProfile) {
+func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, estimatedInputTokens int, apiKeyID string, cacheProfile *promptCacheProfile) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1746,9 +1698,6 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			var chunk map[string]interface{}
 
 			if thinkingState > 0 {
-				if !thinking {
-					return
-				}
 				switch thinkingFormat {
 				case "thinking":
 					var text string
@@ -1837,14 +1786,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		processText := func(text string, isThinking bool, forceFlush bool) {
-			if isThinking && !thinking {
-				return
-			}
-
 			if isThinking {
-				if !allowReasoningSource(&thinkingSource) {
-					return
-				}
+				thinkingSource = thinkingSourceReasoningEvent
 				if !thinkingStarted {
 					sendChunk(text, 1)
 					thinkingStarted = true
@@ -2028,11 +1971,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
 		reasoningOutput := rawReasoningBuilder.String()
-		if thinking && reasoningOutput == "" && extractedReasoning != "" {
+		if reasoningOutput == "" && extractedReasoning != "" {
 			reasoningOutput = extractedReasoning
-		}
-		if !thinking {
-			reasoningOutput = ""
 		}
 		outputTokens = estimateApproxTokens(outputContent) + estimateApproxTokens(reasoningOutput)
 		for _, tc := range toolCalls {
@@ -2079,7 +2019,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string, cacheProfile *promptCacheProfile) {
+func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, estimatedInputTokens int, apiKeyID string, cacheProfile *promptCacheProfile) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	reqStart := time.Now()
@@ -2128,10 +2068,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 
 		finalContent, extractedReasoning := extractThinkingFromContent(content.String())
 		reasoningContent := reasoning.String()
-		if thinking && reasoningContent == "" && extractedReasoning != "" {
+		if reasoningContent == "" && extractedReasoning != "" {
 			reasoningContent = extractedReasoning
-		} else if !thinking {
-			reasoningContent = ""
 		}
 
 		if realInputTokens > 0 {

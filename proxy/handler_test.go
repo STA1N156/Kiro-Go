@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
@@ -12,6 +13,104 @@ import (
 	"testing"
 	"time"
 )
+
+func TestNativeThinkingForwarding(t *testing.T) {
+	for _, protocol := range []string{"openai", "claude", "responses"} {
+		for _, suffix := range []string{"", "-thinking"} {
+			for _, stream := range []bool{false, true} {
+				t.Run(protocol+suffix+map[bool]string{false: "/json", true: "/stream"}[stream], func(t *testing.T) {
+					if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+						t.Fatal(err)
+					}
+					account := config.Account{ID: "native-test", Enabled: true, AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour).Unix(), ProxyURL: kiroRetryTestProxyURL, ProfileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/test"}
+					if err := config.AddAccount(account); err != nil {
+						t.Fatal(err)
+					}
+					installKiroStreamTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+						var payload KiroPayload
+						if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+							t.Fatal(err)
+						}
+						fields := payload.AdditionalModelRequestFields
+						mode, ok := fields["thinking"].(map[string]interface{})
+						if !ok {
+							t.Fatal("missing native thinking fields")
+						}
+						if suffix == "" {
+							if mode["type"] != "disabled" {
+								t.Fatalf("plain model not disabled: %#v", fields)
+							}
+						} else if mode["type"] != "adaptive" || mode["display"] != "summarized" || fields["output_config"].(map[string]interface{})["effort"] != "high" {
+							t.Fatalf("thinking model not high: %#v", fields)
+						}
+						// Even unexpected upstream reasoning on a disabled request must not be hidden.
+						var body bytes.Buffer
+						body.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "alpha"}))
+						body.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "beta"}))
+						body.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "answer"}))
+						return kiroStreamTestResponse(bytes.NewReader(body.Bytes())), nil
+					}))
+					p := accountpool.GetPool()
+					p.Reload()
+					h := &Handler{pool: p, promptCache: newPromptCacheTracker()}
+					body := map[string]interface{}{"model": "claude-opus-4.6" + suffix, "max_tokens": 4096, "stream": stream, "messages": []map[string]string{{"role": "user", "content": "hello"}}}
+					if protocol == "claude" {
+						body["thinking"] = map[string]string{"type": "adaptive", "display": "omitted"}
+					}
+					if protocol == "responses" {
+						body["input"] = "hello"
+						body["store"] = false
+					}
+					encoded, _ := json.Marshal(body)
+					req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(encoded))
+					rec := httptest.NewRecorder()
+					switch protocol {
+					case "openai":
+						h.handleOpenAIChat(rec, req)
+					case "claude":
+						h.handleClaudeMessages(rec, req)
+					case "responses":
+						h.handleOpenAIResponses(rec, req)
+					}
+					result := rec.Body.String()
+					if rec.Code != 200 || !strings.Contains(result, "alpha") || !strings.Contains(result, "beta") || !strings.Contains(result, "answer") {
+						t.Fatalf("reasoning or answer lost, HTTP %d: %s", rec.Code, result)
+					}
+					if protocol == "responses" && stream {
+						ids := map[string]float64{}
+						var complete ResponsesObject
+						for _, line := range strings.Split(result, "\n") {
+							if !strings.HasPrefix(line, "data: ") {
+								continue
+							}
+							var event map[string]interface{}
+							if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event) != nil {
+								continue
+							}
+							if event["type"] == "response.output_item.added" {
+								item := event["item"].(map[string]interface{})
+								ids[item["id"].(string)] = event["output_index"].(float64)
+							}
+							if event["type"] == "response.completed" {
+								data, _ := json.Marshal(event["response"])
+								json.Unmarshal(data, &complete)
+							}
+						}
+						if len(complete.Output) != 2 || complete.Output[0].Type != "reasoning" || complete.Output[0].Summary[0].Text != "alphabeta" {
+							t.Fatalf("invalid final output: %#v", complete.Output)
+						}
+						for i, item := range complete.Output {
+							index, ok := ids[item.ID]
+							if !ok || int(index) != i {
+								t.Fatal("stream and final item IDs/indices differ")
+							}
+						}
+					}
+				})
+			}
+		}
+	}
+}
 
 func TestStatsSaverFlushesOnTickAndClose(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -165,14 +264,7 @@ func BenchmarkLongReplyAssembly(b *testing.B) {
 }
 
 func TestThinkingSourceReasoningFirst(t *testing.T) {
-	var source thinkingStreamSource
-
-	if !allowReasoningSource(&source) {
-		t.Fatalf("expected reasoning source to be accepted first")
-	}
-	if source != thinkingSourceReasoningEvent {
-		t.Fatalf("expected source to be reasoning, got %v", source)
-	}
+	source := thinkingSourceReasoningEvent
 	if allowTagSource(&source) {
 		t.Fatalf("expected tag source to be rejected after reasoning source selected")
 	}
@@ -251,7 +343,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 
 	rec := httptest.NewRecorder()
-	h.handleClaudeNonStream(rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	h.handleClaudeNonStream(rec, payload, "claude-sonnet-4.5", claudeThinkingResponseOptions{}, 1, nil, "")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected retry to succeed, status=%d body=%s", rec.Code, rec.Body.String())
@@ -285,9 +377,6 @@ func TestThinkingSourceTagFirst(t *testing.T) {
 	if source != thinkingSourceTagBlock {
 		t.Fatalf("expected source to be tag, got %v", source)
 	}
-	if allowReasoningSource(&source) {
-		t.Fatalf("expected reasoning source to be rejected after tag source selected")
-	}
 }
 
 func TestThinkingSourceSameSourceRemainsAllowed(t *testing.T) {
@@ -300,13 +389,6 @@ func TestThinkingSourceSameSourceRemainsAllowed(t *testing.T) {
 		t.Fatalf("expected repeated tag source selection to stay allowed")
 	}
 
-	source = thinkingSourceUnknown
-	if !allowReasoningSource(&source) {
-		t.Fatalf("expected initial reasoning source selection to succeed")
-	}
-	if !allowReasoningSource(&source) {
-		t.Fatalf("expected repeated reasoning source selection to stay allowed")
-	}
 }
 
 func TestValidateOpenAIRequestShapeRejectsAssistantPrefill(t *testing.T) {
@@ -359,7 +441,7 @@ func TestValidateClaudeRequestShapeRejectsAssistantPrefill(t *testing.T) {
 	}
 }
 
-func TestResolveClaudeThinkingModeHonorsRequestThinking(t *testing.T) {
+func TestThinkingModeUsesModelSuffix(t *testing.T) {
 	tests := []struct {
 		name         string
 		model        string
@@ -368,18 +450,18 @@ func TestResolveClaudeThinkingModeHonorsRequestThinking(t *testing.T) {
 		wantThinking bool
 	}{
 		{
-			name:         "adaptive request enables thinking",
+			name:         "adaptive request cannot enable a plain model",
 			model:        "claude-sonnet-4.6",
 			thinking:     &ClaudeThinkingConfig{Type: "adaptive"},
 			wantModel:    "claude-sonnet-4.6",
-			wantThinking: true,
+			wantThinking: false,
 		},
 		{
-			name:         "enabled request enables thinking",
+			name:         "enabled request cannot enable a plain model",
 			model:        "claude-opus-4.5",
 			thinking:     &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 2048},
 			wantModel:    "claude-opus-4.5",
-			wantThinking: true,
+			wantThinking: false,
 		},
 		{
 			name:         "disabled request keeps thinking off",
@@ -399,7 +481,7 @@ func TestResolveClaudeThinkingModeHonorsRequestThinking(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotModel, gotThinking := resolveClaudeThinkingMode(tc.model, tc.thinking, "-thinking")
+			gotModel, gotThinking := ParseModelAndThinking(tc.model, "-thinking")
 			if gotModel != tc.wantModel {
 				t.Fatalf("expected model %q, got %q", tc.wantModel, gotModel)
 			}
@@ -410,31 +492,22 @@ func TestResolveClaudeThinkingModeHonorsRequestThinking(t *testing.T) {
 	}
 }
 
-func TestCloneClaudeRequestForThinkingInjectsPromptWithoutMutatingOriginal(t *testing.T) {
+func TestNativeThinkingPreservesPrompt(t *testing.T) {
 	req := &ClaudeRequest{
-		Model:  "claude-sonnet-4.6",
-		System: "Follow the user instructions.",
+		Model:    "claude-sonnet-4.6",
+		System:   "Follow the user instructions.",
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
 	}
-
-	cloned := cloneClaudeRequestForThinking(req, true)
-	blocks, ok := cloned.System.([]interface{})
-	if !ok {
-		t.Fatalf("expected cloned system prompt to be structured blocks, got %T", cloned.System)
-	}
-	if len(blocks) != 2 {
-		t.Fatalf("expected 2 system blocks after prepend, got %d", len(blocks))
-	}
-	gotPrompt := extractSystemPrompt(cloned.System)
-	expected := ThinkingModePrompt + "\n\nFollow the user instructions."
-	if gotPrompt != expected {
-		t.Fatalf("expected injected system prompt %q, got %q", expected, gotPrompt)
+	payload := ClaudeToKiro(req, true)
+	if got := payload.ConversationState.History[0].UserInputMessage.Content; got != req.System {
+		t.Fatalf("native thinking changed the prompt: %q", got)
 	}
 	if original, ok := req.System.(string); !ok || original != "Follow the user instructions." {
 		t.Fatalf("expected original request system prompt to stay unchanged, got %#v", req.System)
 	}
 }
 
-func TestCloneClaudeRequestForThinkingPreservesStructuredSystemBlocks(t *testing.T) {
+func TestNativeThinkingPreservesStructuredSystemBlocks(t *testing.T) {
 	req := &ClaudeRequest{
 		Model: "claude-sonnet-4.6",
 		System: []interface{}{
@@ -449,21 +522,17 @@ func TestCloneClaudeRequestForThinkingPreservesStructuredSystemBlocks(t *testing
 		},
 	}
 
-	cloned := cloneClaudeRequestForThinking(req, true)
-	blocks, ok := cloned.System.([]interface{})
+	ClaudeToKiro(req, true)
+	blocks, ok := req.System.([]interface{})
 	if !ok {
-		t.Fatalf("expected structured system blocks, got %T", cloned.System)
+		t.Fatalf("expected structured system blocks, got %T", req.System)
 	}
-	if len(blocks) != 2 {
-		t.Fatalf("expected 2 system blocks after prepend, got %d", len(blocks))
+	if len(blocks) != 1 {
+		t.Fatalf("expected original system block only, got %d", len(blocks))
 	}
-	first, ok := blocks[0].(map[string]interface{})
-	if !ok || first["text"] != ThinkingModePrompt+"\n" {
-		t.Fatalf("expected first block to be thinking prompt, got %#v", blocks[0])
-	}
-	second, ok := blocks[1].(map[string]interface{})
+	second, ok := blocks[0].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected original system block to remain a map, got %T", blocks[1])
+		t.Fatalf("expected original system block to remain a map, got %T", blocks[0])
 	}
 	cacheControl, ok := second["cache_control"].(map[string]interface{})
 	if !ok || cacheControl["type"] != "ephemeral" {
@@ -471,17 +540,20 @@ func TestCloneClaudeRequestForThinkingPreservesStructuredSystemBlocks(t *testing
 	}
 }
 
-func TestThinkingPromptAffectsClaudeTokenEstimate(t *testing.T) {
-	req := &ClaudeRequest{
-		Model:    "claude-sonnet-4.6",
-		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+func TestNativeThinkingFields(t *testing.T) {
+	if fields := nativeThinkingFields("qwen3-coder-next", false); fields != nil {
+		t.Fatalf("Claude-only parameters leaked into another model family: %#v", fields)
 	}
-
-	baseTokens := estimateClaudeRequestInputTokens(req)
-	thinkingTokens := estimateClaudeRequestInputTokens(cloneClaudeRequestForThinking(req, true))
-
-	if thinkingTokens <= baseTokens {
-		t.Fatalf("expected thinking tokens (%d) to exceed base tokens (%d)", thinkingTokens, baseTokens)
+	for _, enabled := range []bool{false, true} {
+		fields := nativeThinkingFields("claude-opus-4.6", enabled)
+		thinking := fields["thinking"].(ClaudeThinkingConfig)
+		if enabled {
+			if thinking.Type != "adaptive" || thinking.Display != "summarized" || fields["output_config"].(map[string]string)["effort"] != "high" {
+				t.Fatalf("invalid native thinking fields: %#v", fields)
+			}
+		} else if thinking.Type != "disabled" || thinking.Display != "" || fields["output_config"] != nil {
+			t.Fatalf("plain models must explicitly disable thinking: %#v", fields)
+		}
 	}
 }
 
@@ -555,28 +627,24 @@ func TestResolveClaudeThinkingResponseOptions(t *testing.T) {
 		thinking   *ClaudeThinkingConfig
 		defaultFmt string
 		wantFmt    string
-		wantOmit   bool
 	}{
 		{
 			name:       "default config is preserved when display unset",
 			thinking:   &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 2048},
 			defaultFmt: "think",
 			wantFmt:    "think",
-			wantOmit:   false,
 		},
 		{
 			name:       "summarized forces official thinking blocks",
 			thinking:   &ClaudeThinkingConfig{Type: "adaptive", Display: "summarized"},
 			defaultFmt: "reasoning_content",
 			wantFmt:    "thinking",
-			wantOmit:   false,
 		},
 		{
-			name:       "omitted forces official thinking blocks and hides content",
+			name:       "omitted uses thinking blocks without hiding content",
 			thinking:   &ClaudeThinkingConfig{Type: "adaptive", Display: "omitted"},
 			defaultFmt: "think",
 			wantFmt:    "thinking",
-			wantOmit:   true,
 		},
 	}
 
@@ -585,9 +653,6 @@ func TestResolveClaudeThinkingResponseOptions(t *testing.T) {
 			opts := resolveClaudeThinkingResponseOptions(tc.thinking, tc.defaultFmt)
 			if opts.Format != tc.wantFmt {
 				t.Fatalf("expected format %q, got %q", tc.wantFmt, opts.Format)
-			}
-			if opts.OmitDisplay != tc.wantOmit {
-				t.Fatalf("expected omitDisplay=%v, got %v", tc.wantOmit, opts.OmitDisplay)
 			}
 		})
 	}

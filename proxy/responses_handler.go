@@ -115,17 +115,17 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	respID := generateResponseID()
 
 	if req.Stream {
-		h.handleResponsesStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
+		h.handleResponsesStream(w, kiroPayload, actualModel, estimatedInputTokens,
 			apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
 		return
 	}
 
-	h.handleResponsesNonStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
+	h.handleResponsesNonStream(w, kiroPayload, actualModel, estimatedInputTokens,
 		apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
 }
 
 func (h *Handler) handleResponsesNonStream(
-	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
+	w http.ResponseWriter, payload *KiroPayload, model string,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 	cacheProfile *promptCacheProfile,
@@ -176,11 +176,8 @@ func (h *Handler) handleResponsesNonStream(
 			continue
 		}
 
-		finalContent, _ := extractThinkingFromContent(content.String())
+		finalContent := content.String()
 		reasoningContent := reasoning.String()
-		if !thinking {
-			reasoningContent = ""
-		}
 
 		if realInputTokens > 0 {
 			inputTokens = realInputTokens
@@ -194,7 +191,7 @@ func (h *Handler) handleResponsesNonStream(
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, req)
 		if cacheProfile != nil {
 			respObj.Usage.InputTokensDetails = &cachedTokenDetails{h.promptCache.finish(cacheProfile, inputTokens).CacheReadInputTokens}
 		}
@@ -221,10 +218,16 @@ func (h *Handler) handleResponsesNonStream(
 }
 
 func buildResponsesObject(
-	id, model, content string, toolUses []KiroToolUse,
+	id, model, content, reasoning string, toolUses []KiroToolUse,
 	inputTokens, outputTokens int, req *ResponsesRequest,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
+	if reasoning != "" {
+		output = append(output, ResponseOutputItem{
+			ID: generateOutputItemID("rs"), Type: "reasoning", Status: "completed",
+			Summary: []ResponseContentPart{{Type: "summary_text", Text: reasoning}},
+		})
+	}
 
 	if strings.TrimSpace(content) != "" {
 		output = append(output, ResponseOutputItem{
@@ -278,7 +281,7 @@ func buildResponsesObject(
 }
 
 func (h *Handler) handleResponsesStream(
-	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
+	w http.ResponseWriter, payload *KiroPayload, model string,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 	cacheProfile *promptCacheProfile,
@@ -293,7 +296,12 @@ func (h *Handler) handleResponsesStream(
 		return
 	}
 
+	sequenceNumber := 0
 	send := func(eventName string, payload interface{}) {
+		if event, ok := payload.(map[string]interface{}); ok {
+			event["sequence_number"] = sequenceNumber
+			sequenceNumber++
+		}
 		data, err := json.Marshal(payload)
 		if err != nil {
 			return
@@ -343,6 +351,7 @@ func (h *Handler) handleResponsesStream(
 
 		var (
 			fullText        strings.Builder
+			messageText     strings.Builder
 			reasoningText   strings.Builder
 			toolUses        []KiroToolUse
 			inputTokens     int
@@ -351,16 +360,25 @@ func (h *Handler) handleResponsesStream(
 			realInputTokens int
 		)
 
-		messageItemID := generateOutputItemID("msg")
+		var messageItemID string
 		messageStarted := false
 		outputIndex := 0
 		contentIndex := 0
+		streamOutput := []ResponseOutputItem{}
+		reasoningIndex := -1
+		reasoningItemID := generateOutputItemID("rs")
 
 		ensureMessageStarted := func() {
 			if messageStarted {
 				return
 			}
 			messageStarted = true
+			messageText.Reset()
+			messageItemID = generateOutputItemID("msg")
+			outputIndex = len(streamOutput)
+			streamOutput = append(streamOutput, ResponseOutputItem{
+				ID: messageItemID, Type: "message", Role: "assistant", Status: "completed",
+			})
 			send("response.output_item.added", map[string]interface{}{
 				"type":         "response.output_item.added",
 				"output_index": outputIndex,
@@ -390,11 +408,31 @@ func (h *Handler) handleResponsesStream(
 					return
 				}
 				if isThinking {
+					if reasoningIndex < 0 {
+						reasoningIndex = len(streamOutput)
+						item := ResponseOutputItem{ID: reasoningItemID, Type: "reasoning", Status: "in_progress"}
+						streamOutput = append(streamOutput, item)
+						send("response.output_item.added", map[string]interface{}{
+							"type": "response.output_item.added", "output_index": reasoningIndex,
+							"item": map[string]interface{}{"id": reasoningItemID, "type": "reasoning", "status": "in_progress", "summary": []ResponseContentPart{}},
+						})
+						send("response.reasoning_summary_part.added", map[string]interface{}{
+							"type": "response.reasoning_summary_part.added", "item_id": reasoningItemID,
+							"output_index": reasoningIndex, "summary_index": 0,
+							"part": ResponseContentPart{Type: "summary_text", Text: ""},
+						})
+					}
 					reasoningText.WriteString(text)
+					send("response.reasoning_summary_text.delta", map[string]interface{}{
+						"type": "response.reasoning_summary_text.delta", "item_id": reasoningItemID,
+						"output_index": reasoningIndex, "summary_index": 0, "delta": text,
+					})
+					responseStarted = true
 					return
 				}
 				fullText.WriteString(text)
 				ensureMessageStarted()
+				messageText.WriteString(text)
 				send("response.output_text.delta", map[string]interface{}{
 					"type":          "response.output_text.delta",
 					"item_id":       messageItemID,
@@ -406,6 +444,7 @@ func (h *Handler) handleResponsesStream(
 			},
 			OnToolUse: func(tu KiroToolUse) {
 				if messageStarted {
+					streamOutput[outputIndex].Content = []ResponseContentPart{{Type: "output_text", Text: messageText.String()}}
 					send("response.content_part.done", map[string]interface{}{
 						"type":          "response.content_part.done",
 						"item_id":       messageItemID,
@@ -413,7 +452,7 @@ func (h *Handler) handleResponsesStream(
 						"content_index": contentIndex,
 						"part": map[string]interface{}{
 							"type": "output_text",
-							"text": fullText.String(),
+							"text": messageText.String(),
 						},
 					})
 					send("response.output_item.done", map[string]interface{}{
@@ -426,17 +465,21 @@ func (h *Handler) handleResponsesStream(
 							"status": "completed",
 							"content": []map[string]interface{}{{
 								"type": "output_text",
-								"text": fullText.String(),
+								"text": messageText.String(),
 							}},
 						},
 					})
 					messageStarted = false
-					outputIndex++
 				}
 
 				toolUses = append(toolUses, tu)
 				args, _ := json.Marshal(tu.Input)
 				fcID := generateOutputItemID("fc")
+				outputIndex = len(streamOutput)
+				streamOutput = append(streamOutput, ResponseOutputItem{
+					ID: fcID, Type: "function_call", Status: "completed", CallID: tu.ToolUseID,
+					Name: tu.Name, Arguments: string(args),
+				})
 				send("response.output_item.added", map[string]interface{}{
 					"type":         "response.output_item.added",
 					"output_index": outputIndex,
@@ -467,7 +510,6 @@ func (h *Handler) handleResponsesStream(
 						"arguments": string(args),
 					},
 				})
-				outputIndex++
 				responseStarted = true
 			},
 			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
@@ -500,13 +542,27 @@ func (h *Handler) handleResponsesStream(
 			return
 		}
 
-		finalContent, _ := extractThinkingFromContent(fullText.String())
+		finalContent := fullText.String()
 		reasoning := reasoningText.String()
-		if !thinking {
-			reasoning = ""
+		if reasoningIndex >= 0 {
+			part := ResponseContentPart{Type: "summary_text", Text: reasoning}
+			streamOutput[reasoningIndex].Status = "completed"
+			streamOutput[reasoningIndex].Summary = []ResponseContentPart{part}
+			send("response.reasoning_summary_text.done", map[string]interface{}{
+				"type": "response.reasoning_summary_text.done", "item_id": reasoningItemID,
+				"output_index": reasoningIndex, "summary_index": 0, "text": reasoning,
+			})
+			send("response.reasoning_summary_part.done", map[string]interface{}{
+				"type": "response.reasoning_summary_part.done", "item_id": reasoningItemID,
+				"output_index": reasoningIndex, "summary_index": 0, "part": part,
+			})
+			send("response.output_item.done", map[string]interface{}{
+				"type": "response.output_item.done", "output_index": reasoningIndex, "item": streamOutput[reasoningIndex],
+			})
 		}
 
 		if messageStarted {
+			streamOutput[outputIndex].Content = []ResponseContentPart{{Type: "output_text", Text: messageText.String()}}
 			send("response.content_part.done", map[string]interface{}{
 				"type":          "response.content_part.done",
 				"item_id":       messageItemID,
@@ -514,7 +570,7 @@ func (h *Handler) handleResponsesStream(
 				"content_index": contentIndex,
 				"part": map[string]interface{}{
 					"type": "output_text",
-					"text": finalContent,
+					"text": messageText.String(),
 				},
 			})
 			send("response.output_item.done", map[string]interface{}{
@@ -527,7 +583,7 @@ func (h *Handler) handleResponsesStream(
 					"status": "completed",
 					"content": []map[string]interface{}{{
 						"type": "output_text",
-						"text": finalContent,
+						"text": messageText.String(),
 					}},
 				},
 			})
@@ -545,7 +601,10 @@ func (h *Handler) handleResponsesStream(
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, req)
+		if len(streamOutput) > 0 {
+			respObj.Output = streamOutput
+		}
 		if cacheProfile != nil {
 			respObj.Usage.InputTokensDetails = &cachedTokenDetails{h.promptCache.finish(cacheProfile, inputTokens).CacheReadInputTokens}
 		}

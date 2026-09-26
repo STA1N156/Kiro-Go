@@ -113,7 +113,7 @@ API Key accounts call the Kiro CLI runtime (`https://runtime.{region}.kiro.dev/`
 
 ## Thinking Mode
 
-Append a suffix (default `-thinking`) to the model name, e.g. `claude-sonnet-4.5-thinking`. Claude-compatible requests that include a top-level `thinking` config such as `{"type":"enabled","budget_tokens":2048}` or `{"type":"adaptive"}` also enable thinking mode automatically. Configure output format in the admin panel under Settings - Thinking Mode.
+For Claude models, the model-name suffix (default `-thinking`) is the switch: `claude-opus-4.6-thinking` sends native `thinking.type: adaptive`, `thinking.display: summarized`, and `output_config.effort: high`; the same name without the suffix explicitly sends `thinking.type: disabled`. Client-side `thinking` settings do not override this rule. No thinking prompt is injected. Upstream reasoning content is forwarded even if it unexpectedly arrives for a plain model or the client requests `display: omitted`. Chat Completions and Claude output formats remain configurable under Settings - Thinking Mode; Responses uses reasoning summary items and streaming events. Claude-specific request parameters are not added to other model families.
 
 ## Outbound Proxy
 

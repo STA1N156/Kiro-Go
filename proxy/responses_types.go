@@ -39,6 +39,7 @@ type ResponseOutputItem struct {
 	Role      string                `json:"role,omitempty"`
 	Status    string                `json:"status,omitempty"`
 	Content   []ResponseContentPart `json:"content,omitempty"`
+	Summary   []ResponseContentPart `json:"summary,omitempty"`
 	CallID    string                `json:"call_id,omitempty"`
 	Name      string                `json:"name,omitempty"`
 	Arguments string                `json:"arguments,omitempty"`

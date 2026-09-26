@@ -38,10 +38,6 @@ var modelAliases = []modelMapping{
 // (claude-sonnet-4-20250514) are not accidentally rewritten.
 var claudeVersionPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku)-(\d+)-(\d{1,2})\b`)
 
-// Thinking 模式提示
-const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>`
-
 const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
 const toolResultImagePlaceholder = "[Tool returned an image; the image is attached to this message.]"
@@ -72,7 +68,7 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 
 	// Strip the configured thinking suffix (e.g. "-thinking") if present.
 	suffixLower := strings.ToLower(thinkingSuffix)
-	if strings.HasSuffix(lower, suffixLower) {
+	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
 		thinking = true
 		model = model[:len(model)-len(thinkingSuffix)]
 		lower = strings.ToLower(model)
@@ -99,17 +95,18 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	return model, thinking
 }
 
-func resolveClaudeThinkingMode(model string, thinkingCfg *ClaudeThinkingConfig, thinkingSuffix string) (string, bool) {
-	actualModel, suffixThinking := ParseModelAndThinking(model, thinkingSuffix)
-	return actualModel, suffixThinking || isClaudeThinkingRequested(thinkingCfg)
-}
-
-func isClaudeThinkingRequested(thinkingCfg *ClaudeThinkingConfig) bool {
-	if thinkingCfg == nil {
-		return false
+func nativeThinkingFields(model string, thinking bool) map[string]interface{} {
+	// Avoid sending Claude-only parameters to other model families.
+	if !strings.HasPrefix(strings.ToLower(model), "claude-") {
+		return nil
 	}
-	kind := strings.ToLower(strings.TrimSpace(thinkingCfg.Type))
-	return kind == "enabled" || kind == "adaptive"
+	if !thinking {
+		return map[string]interface{}{"thinking": ClaudeThinkingConfig{Type: "disabled"}}
+	}
+	return map[string]interface{}{
+		"thinking":      ClaudeThinkingConfig{Type: "adaptive", Display: "summarized"},
+		"output_config": map[string]string{"effort": "high"},
+	}
 }
 
 func MapModel(model string) string {
@@ -206,7 +203,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	origin := "AI_EDITOR"
 
 	// 提取系统提示
-	systemPrompt := buildClaudeSystemPrompt(req.System, thinking)
+	systemPrompt := applyPromptFilters(extractSystemPrompt(req.System))
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
@@ -306,7 +303,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	kiroTools, toolNameMap := convertClaudeTools(req.Tools)
 
 	// 构建 payload
-	payload := &KiroPayload{}
+	payload := &KiroPayload{AdditionalModelRequestFields: nativeThinkingFields(modelID, thinking)}
 	payload.ToolNameMap = toolNameMap
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"
@@ -347,18 +344,6 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
-}
-
-func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
-	systemPrompt := extractSystemPrompt(system)
-	systemPrompt = applyPromptFilters(systemPrompt)
-	if !thinking {
-		return systemPrompt
-	}
-	if systemPrompt == "" {
-		return ThinkingModePrompt
-	}
-	return ThinkingModePrompt + "\n\n" + systemPrompt
 }
 
 // applyPromptFilters applies all enabled prompt filter rules to the system prompt.
@@ -528,77 +513,6 @@ func collapseBlankLines(s string) string {
 		out = append(out, l)
 	}
 	return strings.Join(out, "\n")
-}
-
-func cloneClaudeRequestForThinking(req *ClaudeRequest, thinking bool) *ClaudeRequest {
-	if req == nil {
-		return nil
-	}
-
-	cloned := *req
-	if thinking {
-		cloned.System = prependThinkingSystem(req.System)
-	}
-	return &cloned
-}
-
-func prependThinkingSystem(system interface{}) interface{} {
-	thinkingText := ThinkingModePrompt
-	if hasClaudeSystemContent(system) {
-		thinkingText += "\n"
-	}
-	thinkingBlock := map[string]interface{}{
-		"type": "text",
-		"text": thinkingText,
-	}
-
-	switch v := system.(type) {
-	case nil:
-		return []interface{}{thinkingBlock}
-	case string:
-		if v == "" {
-			return []interface{}{thinkingBlock}
-		}
-		return []interface{}{
-			thinkingBlock,
-			map[string]interface{}{
-				"type": "text",
-				"text": v,
-			},
-		}
-	case []interface{}:
-		blocks := make([]interface{}, 0, len(v)+1)
-		blocks = append(blocks, thinkingBlock)
-		blocks = append(blocks, v...)
-		return blocks
-	case []string:
-		blocks := make([]interface{}, 0, len(v)+1)
-		blocks = append(blocks, thinkingBlock)
-		for _, block := range v {
-			blocks = append(blocks, map[string]interface{}{
-				"type": "text",
-				"text": block,
-			})
-		}
-		return blocks
-	default:
-		return []interface{}{thinkingBlock}
-	}
-}
-
-func hasClaudeSystemContent(system interface{}) bool {
-	switch v := system.(type) {
-	case nil:
-		return false
-	case string:
-		return v != ""
-	case []interface{}:
-		return len(v) > 0
-	case []string:
-		return len(v) > 0
-	default:
-		return true
-	}
 }
 
 func extractSystemPrompt(system interface{}) string {
@@ -1166,11 +1080,6 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	// 如果启用 thinking 模式，注入 thinking 提示
-	if thinking {
-		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
-	}
-
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
 	var currentContent string
@@ -1312,7 +1221,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	kiroTools := convertOpenAITools(req.Tools)
 
 	// 构建 payload
-	payload := &KiroPayload{}
+	payload := &KiroPayload{AdditionalModelRequestFields: nativeThinkingFields(modelID, thinking)}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
