@@ -3826,12 +3826,13 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":         config.GetApiKey(),
-		"requireApiKey":  config.IsApiKeyRequired(),
-		"port":           config.GetPort(),
-		"host":           config.GetHost(),
-		"allowOverUsage": config.GetAllowOverUsage(),
-		"localCache":     config.GetLocalCacheSettings(),
+		"apiKey":               config.GetApiKey(),
+		"requireApiKey":        config.IsApiKeyRequired(),
+		"port":                 config.GetPort(),
+		"host":                 config.GetHost(),
+		"allowOverUsage":       config.GetAllowOverUsage(),
+		"localCache":           config.GetLocalCacheSettings(),
+		"modelCooldownMinutes": config.GetModelCooldownMinutes(),
 	})
 }
 
@@ -3880,11 +3881,12 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey         *string                    `json:"apiKey,omitempty"`
-		RequireApiKey  *bool                      `json:"requireApiKey,omitempty"`
-		Password       string                     `json:"password,omitempty"`
-		AllowOverUsage *bool                      `json:"allowOverUsage,omitempty"`
-		LocalCache     *config.LocalCacheSettings `json:"localCache,omitempty"`
+		ApiKey               *string                    `json:"apiKey,omitempty"`
+		RequireApiKey        *bool                      `json:"requireApiKey,omitempty"`
+		Password             string                     `json:"password,omitempty"`
+		AllowOverUsage       *bool                      `json:"allowOverUsage,omitempty"`
+		LocalCache           *config.LocalCacheSettings `json:"localCache,omitempty"`
+		ModelCooldownMinutes *int                       `json:"modelCooldownMinutes,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3892,6 +3894,11 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.ModelCooldownMinutes != nil && (*req.ModelCooldownMinutes < 1 || *req.ModelCooldownMinutes > 10080) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Model cooldown must be 1–10080 minutes"})
+		return
+	}
 	if req.LocalCache != nil {
 		if req.LocalCache.TTLMinutes < 1 || req.LocalCache.TTLMinutes > 10080 {
 			w.WriteHeader(400)
@@ -3904,7 +3911,7 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := config.UpdateSettingsPatch(req.ApiKey, req.RequireApiKey, req.Password); err != nil {
+	if err := config.UpdateSettingsPatch(req.ApiKey, req.RequireApiKey, req.Password, req.ModelCooldownMinutes); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

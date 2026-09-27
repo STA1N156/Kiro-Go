@@ -429,10 +429,16 @@
           </div>
         </div>
 
-        <!-- Statistics reset -->
+        <!-- Model cooldown and statistics -->
         <div class="card">
-          <div class="card-header"><span class="card-title" data-i18n="settings.statistics"></span></div>
+          <div class="card-header"><span class="card-title" data-i18n="settings.cooldownAndStatistics"></span></div>
+          <div class="form-group">
+            <label for="modelCooldownMinutes" data-i18n="settings.modelCooldownMinutes"></label>
+            <input type="number" id="modelCooldownMinutes" min="1" max="10080" step="1" value="3" />
+            <small data-i18n="settings.modelCooldownHint"></small>
+          </div>
           <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-primary" id="saveModelCooldownBtn" data-i18n="settings.saveModelCooldown"></button>
             <button class="btn btn-danger" id="resetStatsBtn" data-i18n="settings.resetStats"></button>
             <button class="btn btn-outline" id="resetCooldownsBtn" data-i18n="settings.resetCooldowns"></button>
           </div>

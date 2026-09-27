@@ -13,6 +13,40 @@ import (
 	"time"
 )
 
+func TestModelCooldownSettingsAPI(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	config.SetPassword("cooldown-settings-test")
+	h := &Handler{}
+	request := func(method, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "/admin/api/settings", strings.NewReader(body))
+		r.Header.Set("X-Admin-Password", "cooldown-settings-test")
+		w := httptest.NewRecorder()
+		h.handleAdminAPI(w, r)
+		return w
+	}
+	if w := request("GET", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"modelCooldownMinutes":3`) {
+		t.Fatalf("wrong default: %d %s", w.Code, w.Body.String())
+	}
+	for _, body := range []string{`{"modelCooldownMinutes":1}`, `{"modelCooldownMinutes":10080}`, `{"modelCooldownMinutes":8}`, `{}`} {
+		if w := request("POST", body); w.Code != 200 {
+			t.Fatalf("save failed: %d %s", w.Code, w.Body.String())
+		}
+	}
+	for _, body := range []string{`{"modelCooldownMinutes":0}`, `{"modelCooldownMinutes":-1}`, `{"modelCooldownMinutes":10081}`, `{"modelCooldownMinutes":1.5}`, `{"modelCooldownMinutes":"3"}`} {
+		if w := request("POST", body); w.Code != 400 || config.GetModelCooldownMinutes() != 8 {
+			t.Fatalf("invalid duration accepted: %s (%d)", body, w.Code)
+		}
+	}
+	if err := config.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if w := request("GET", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"modelCooldownMinutes":8`) {
+		t.Fatalf("saved duration lost: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestResetCooldownsAdminAPI(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatal(err)
@@ -62,6 +96,14 @@ func TestEmptyStreamModelCooldownAcrossAPIs(t *testing.T) {
 			t.Run(protocol+map[bool]string{false: "/json", true: "/stream"}[stream], func(t *testing.T) {
 				if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 					t.Fatal(err)
+				}
+				// Exercise both the default and a saved custom duration across all APIs.
+				cooldownMinutes := 3
+				if stream {
+					cooldownMinutes = 8
+					if err := config.UpdateSettingsPatch(nil, nil, "", &cooldownMinutes); err != nil {
+						t.Fatal(err)
+					}
 				}
 				for _, id := range []string{"empty-a", "empty-b"} {
 					if err := config.AddAccount(config.Account{ID: id, Enabled: true, AccessToken: id, ProxyURL: kiroRetryTestProxyURL, ProfileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/test"}); err != nil {
@@ -117,8 +159,9 @@ func TestEmptyStreamModelCooldownAcrossAPIs(t *testing.T) {
 				if calls[first+"claude-opus-5.5"] != 1 {
 					t.Fatal("empty account was retried across endpoints")
 				}
-				if remaining := time.Until(p.ModelCooldownUntil(first, "claude-opus-5.5")); remaining < 8*time.Minute-time.Second || remaining > 8*time.Minute {
-					t.Fatalf("expected 8-minute cooldown: %s", remaining)
+				wantDuration := time.Duration(cooldownMinutes) * time.Minute
+				if remaining := time.Until(p.ModelCooldownUntil(first, "claude-opus-5.5")); remaining < wantDuration-time.Second || remaining > wantDuration {
+					t.Fatalf("expected %d-minute cooldown: %s", cooldownMinutes, remaining)
 				}
 				// The account cards must expose cooldowns from tests as well as public requests.
 				config.SetModelCooldown(first, "expired-model", time.Now().Add(-time.Second))

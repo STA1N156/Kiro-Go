@@ -46,6 +46,15 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 	return commitStatsSnapshot(tmp, path, revision, usageRevision)
 }
 
+func GetModelCooldownMinutes() int {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.ModelCooldownMinutes < 1 || cfg.ModelCooldownMinutes > 10080 {
+		return 3
+	}
+	return cfg.ModelCooldownMinutes
+}
+
 // Model cooldowns share the existing batched save, never writing on the request path.
 func GetModelCooldowns() []ModelCooldown {
 	cfgLock.RLock()

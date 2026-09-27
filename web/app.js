@@ -1614,6 +1614,7 @@
     $('allowOverUsage').checked = d.allowOverUsage || false;
     $('localCacheEnabled').checked = d.localCache?.enabled !== false;
     $('localCacheTTL').value = d.localCache?.ttlMinutes ?? 5;
+    $('modelCooldownMinutes').value = d.modelCooldownMinutes ?? 3;
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
@@ -1771,6 +1772,25 @@
       toastPrimary(t('settings.statsReset'));
     } catch (e) {
       toastError((e && e.message) || t('common.failed'));
+    }
+  }
+  async function saveModelCooldown() {
+    const minutes = Number($('modelCooldownMinutes').value);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
+      toast(t('settings.modelCooldownInvalid'), 'warning');
+      return;
+    }
+    const button = $('saveModelCooldownBtn');
+    button.disabled = true;
+    try {
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ modelCooldownMinutes: minutes }) });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || t('common.saveFailed'));
+      toastPrimary(t('settings.modelCooldownSaved'));
+    } catch (e) {
+      toastError((e && e.message) || t('common.saveFailed'));
+    } finally {
+      button.disabled = false;
     }
   }
   async function resetCooldowns() {
@@ -3314,6 +3334,7 @@
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
     $('resetStatsBtn').addEventListener('click', resetStats);
     $('resetCooldownsBtn').addEventListener('click', resetCooldowns);
+    $('saveModelCooldownBtn').addEventListener('click', saveModelCooldown);
     bindApiKeyEvents();
   }
 
