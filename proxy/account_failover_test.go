@@ -13,6 +13,49 @@ import (
 	"time"
 )
 
+func TestResetCooldownsAdminAPI(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	config.SetPassword("local-admin-test")
+	if err := config.AddAccount(config.Account{ID: "reset-test", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	p.RecordError("reset-test", true)
+	p.CooldownModel("reset-test", "claude-opus-5.5", time.Hour)
+	h := &Handler{pool: p, totalRequests: 7}
+	for _, tc := range []struct {
+		method, password string
+		status           int
+	}{
+		{"POST", "", http.StatusUnauthorized},
+		{"GET", "local-admin-test", http.StatusNotFound},
+		{"POST", "local-admin-test", http.StatusOK},
+	} {
+		r := httptest.NewRequest(tc.method, "/admin/api/cooldowns/reset", nil)
+		r.Header.Set("X-Admin-Password", tc.password)
+		w := httptest.NewRecorder()
+		h.handleAdminAPI(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("%s: status %d, want %d", tc.method, w.Code, tc.status)
+		}
+		if tc.status != http.StatusOK && len(config.GetModelCooldowns()) == 0 {
+			t.Fatal("rejected request cleared cooldowns")
+		}
+		if tc.status == http.StatusOK && !strings.Contains(w.Body.String(), `"success":true`) {
+			t.Fatal("missing reset confirmation")
+		}
+	}
+	if len(config.GetModelCooldowns()) != 0 || p.AvailableCount() != 1 {
+		t.Fatal("reset did not clear account and model cooldowns")
+	}
+	if h.totalRequests != 7 {
+		t.Fatal("cooldown reset changed statistics")
+	}
+}
+
 func TestEmptyStreamModelCooldownAcrossAPIs(t *testing.T) {
 	for _, protocol := range []string{"claude", "openai", "responses", "admin"} {
 		for _, stream := range []bool{false, true} {
@@ -74,8 +117,8 @@ func TestEmptyStreamModelCooldownAcrossAPIs(t *testing.T) {
 				if calls[first+"claude-opus-5.5"] != 1 {
 					t.Fatal("empty account was retried across endpoints")
 				}
-				if remaining := time.Until(p.ModelCooldownUntil(first, "claude-opus-5.5")); remaining < time.Hour-time.Minute || remaining > time.Hour {
-					t.Fatalf("expected one-hour cooldown: %s", remaining)
+				if remaining := time.Until(p.ModelCooldownUntil(first, "claude-opus-5.5")); remaining < 19*time.Minute || remaining > 20*time.Minute {
+					t.Fatalf("expected 20-minute cooldown: %s", remaining)
 				}
 				// The account cards must expose cooldowns from tests as well as public requests.
 				config.SetModelCooldown(first, "expired-model", time.Now().Add(-time.Second))
@@ -125,6 +168,52 @@ func TestEmptyStreamModelCooldownAcrossAPIs(t *testing.T) {
 				}
 				if !time.Now().Before(p.ModelCooldownUntil(first, "claude-opus-5.5")) {
 					t.Fatal("another model's success cleared cooldown")
+				}
+			})
+		}
+	}
+}
+
+func TestAccountRetryLimit(t *testing.T) {
+	for _, protocol := range []string{"claude", "openai", "responses"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(protocol+map[bool]string{false: "/json", true: "/stream"}[stream], func(t *testing.T) {
+				if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+					t.Fatal(err)
+				}
+				for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
+					if err := config.AddAccount(config.Account{ID: id, Enabled: true, AuthMethod: "api_key", KiroApiKey: id, ProxyURL: kiroRetryTestProxyURL}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				p := accountpool.GetPool()
+				p.Reload()
+				h := &Handler{pool: p, promptCache: newPromptCacheTracker()}
+				calls := make(map[string]int)
+				installKiroStreamTestClient(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					calls[r.Header.Get("Authorization")]++
+					response := kiroStreamTestResponse(strings.NewReader("upstream unavailable"))
+					response.StatusCode = http.StatusInternalServerError
+					return response, nil
+				}))
+				body, _ := json.Marshal(map[string]interface{}{"model": "claude-opus-5.5", "max_tokens": 2048, "stream": stream, "messages": []map[string]string{{"role": "user", "content": "hello"}}, "input": "hello", "store": false})
+				r := httptest.NewRequest("POST", "/", bytes.NewReader(body))
+				w := httptest.NewRecorder()
+				switch protocol {
+				case "claude":
+					h.handleClaudeMessages(w, r)
+				case "openai":
+					h.handleOpenAIChat(w, r)
+				case "responses":
+					h.handleOpenAIResponses(w, r)
+				}
+				if len(calls) != 5 {
+					t.Fatalf("expected 5 distinct credentials including the first, got %v", calls)
+				}
+				for id, count := range calls {
+					if count != 1 {
+						t.Fatalf("credential %s attempted %d times", id, count)
+					}
 				}
 			})
 		}

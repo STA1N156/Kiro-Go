@@ -290,6 +290,19 @@ func (p *AccountPool) CooldownModel(id, model string, duration time.Duration) ti
 	return until
 }
 
+// ResetCooldowns clears scheduling penalties without changing account settings or usage.
+func (p *AccountPool) ResetCooldowns() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := config.ResetModelCooldowns(); err != nil {
+		return err
+	}
+	p.cooldowns = make(map[string]time.Time)
+	p.modelCooldowns = make(map[[2]string]time.Time)
+	p.errorCounts = make(map[string]int)
+	return nil
+}
+
 // GetByID 根据 ID 获取账号
 func (p *AccountPool) GetByID(id string) *config.Account {
 	p.mu.RLock()

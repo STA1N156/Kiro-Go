@@ -74,6 +74,19 @@ func SetModelCooldown(id, model string, until time.Time) {
 	statsRevision++
 }
 
+// Persist manual resets immediately so a restart cannot restore old cooldowns.
+func ResetModelCooldowns() error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	previous := cfg.ModelCooldowns
+	cfg.ModelCooldowns = nil
+	if err := saveLocked(); err != nil {
+		cfg.ModelCooldowns = previous
+		return err
+	}
+	return nil
+}
+
 func commitStatsSnapshot(tmp, path string, revision, usageRevision uint64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()

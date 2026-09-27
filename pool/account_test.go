@@ -11,6 +11,57 @@ import (
 	"time"
 )
 
+func TestResetCooldowns(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	for _, account := range []config.Account{
+		{ID: "a", Enabled: true, TotalTokens: 100, RequestCount: 7},
+		{ID: "b", Enabled: true},
+		{ID: "disabled", Enabled: false, BanStatus: "BANNED"},
+		{ID: "quota", Enabled: true, UsageCurrent: 10, UsageLimit: 10},
+	} {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := newTestPool()
+	p.Reload()
+	p.RecordError("a", true)
+	for i := 0; i < 3; i++ {
+		p.RecordError("b", false)
+	}
+	p.CooldownModel("a", "claude-opus-5.5", time.Hour)
+	p.CooldownModel("disabled", "claude-opus-4.6", time.Hour)
+	if err := p.ResetCooldowns(); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.cooldowns) != 0 || len(p.modelCooldowns) != 0 || len(p.errorCounts) != 0 {
+		t.Fatal("reset did not clear all cooldowns and error counters")
+	}
+	if err := config.Load(); err != nil {
+		t.Fatal(err)
+	}
+	p.Reload()
+	if len(config.GetModelCooldowns()) != 0 || len(p.modelCooldowns) != 0 {
+		t.Fatal("reload restored cooldowns")
+	}
+	accounts := config.GetAccounts()
+	if accounts[0].TotalTokens != 100 || accounts[0].RequestCount != 7 || accounts[2].Enabled || accounts[2].BanStatus != "BANNED" {
+		t.Fatal("reset changed usage or disabled account settings")
+	}
+	if got := p.GetNextForModelExcluding("claude-opus-5.5", map[string]bool{"b": true}); got == nil || got.ID != "a" {
+		t.Fatal("cleared account is not routable")
+	}
+	if got := p.GetNextExcluding(map[string]bool{"a": true, "b": true}); got != nil {
+		t.Fatal("reset enabled a disabled or over-quota account")
+	}
+	p.RecordError("b", false)
+	if len(p.cooldowns) != 0 {
+		t.Fatal("old consecutive error count survived reset")
+	}
+}
+
 func TestConcurrentUsageSurvivesPoolReload(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatal(err)
@@ -223,8 +274,8 @@ func TestModelCooldownIsolationAndPersistence(t *testing.T) {
 	p := newTestPool()
 	p.Reload()
 	before, _ := os.ReadFile(path)
-	until := p.CooldownModel("a", "CLAUDE-OPUS-5.5", time.Hour)
-	if remaining := time.Until(until); remaining < time.Hour-time.Second || remaining > time.Hour {
+	until := p.CooldownModel("a", "CLAUDE-OPUS-5.5", 20*time.Minute)
+	if remaining := time.Until(until); remaining < 20*time.Minute-time.Second || remaining > 20*time.Minute {
 		t.Fatalf("wrong cooldown duration: %s", remaining)
 	}
 	after, _ := os.ReadFile(path)

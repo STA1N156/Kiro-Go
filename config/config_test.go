@@ -6,7 +6,55 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestResetModelCooldownsPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatal(err)
+	}
+	SetModelCooldown("account", "claude-opus-5.5", time.Now().Add(time.Hour))
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp, err := writeConfigTemp(path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmp)
+	revision, usageRevision := configRevision, statsRevision
+	if err := ResetModelCooldowns(); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitStatsSnapshot(tmp, path, revision, usageRevision); err != nil {
+		t.Fatal(err)
+	}
+	if err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if len(GetModelCooldowns()) != 0 {
+		t.Fatal("old snapshot or reload restored cleared cooldowns")
+	}
+}
+
+func TestResetModelCooldownsSaveFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Hour)
+	SetModelCooldown("account", "claude-opus-5.5", until)
+	cfgPath = filepath.Join(t.TempDir(), "missing", "config.json")
+	t.Cleanup(func() { cfgPath = path })
+	if err := ResetModelCooldowns(); err == nil {
+		t.Fatal("expected save failure")
+	}
+	if entries := GetModelCooldowns(); len(entries) != 1 || entries[0].Until != until.Unix() {
+		t.Fatal("failed reset changed cooldowns")
+	}
+}
 
 func TestUsageBatchedPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")

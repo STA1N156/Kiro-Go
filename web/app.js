@@ -1773,6 +1773,29 @@
       toastError((e && e.message) || t('common.failed'));
     }
   }
+  async function resetCooldowns() {
+    const button = $('resetCooldownsBtn');
+    button.disabled = true;
+    try {
+      const ok = await confirmAction(t('settings.confirmResetCooldowns'), {
+        title: t('settings.resetCooldowns'),
+        confirmText: t('settings.resetCooldowns'),
+        variant: 'danger'
+      });
+      if (!ok) return;
+      const res = await api('/cooldowns/reset', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || t('common.failed'));
+      accountsData.forEach(account => { account.modelCooldowns = []; });
+      renderAccounts();
+      toastPrimary(t('settings.cooldownsReset'));
+      loadAccounts().catch(() => {});
+    } catch (e) {
+      toastError((e && e.message) || t('common.failed'));
+    } finally {
+      button.disabled = false;
+    }
+  }
   // Multi API Key management
   let apiKeysCache = [];
   let apiKeyEditingId = '';
@@ -3290,6 +3313,7 @@
     $('proxyType').addEventListener('change', onProxyTypeChange);
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
     $('resetStatsBtn').addEventListener('click', resetStats);
+    $('resetCooldownsBtn').addEventListener('click', resetCooldowns);
     bindApiKeyEvents();
   }
 

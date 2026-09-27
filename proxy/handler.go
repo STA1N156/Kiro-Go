@@ -2311,6 +2311,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetStats(w, r)
 	case path == "/stats/reset" && r.Method == "POST":
 		h.apiResetStats(w, r)
+	case path == "/cooldowns/reset" && r.Method == "POST":
+		h.apiResetCooldowns(w, r)
 	case path == "/logs" && r.Method == "GET":
 		h.apiGetLogs(w, r)
 	case path == "/logs" && r.Method == "DELETE":
@@ -3946,6 +3948,15 @@ func (h *Handler) apiResetStats(w http.ResponseWriter, r *http.Request) {
 	if err := config.UpdateStats(0, 0, 0, 0, 0); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save statistics reset"})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (h *Handler) apiResetCooldowns(w http.ResponseWriter, r *http.Request) {
+	if err := h.pool.ResetCooldowns(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to save cooldown reset"})
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
