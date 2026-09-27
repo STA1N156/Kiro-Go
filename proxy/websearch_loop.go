@@ -197,7 +197,7 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := h.callKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true

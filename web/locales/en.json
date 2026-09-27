@@ -38,6 +38,8 @@
   "accounts.tokens": "Tokens",
   "accounts.credits": "Credits",
   "accounts.expiry": "Expiry",
+  "accounts.modelCooldown": "Model cooldown",
+  "accounts.cooldownRemaining": "{0} remaining",
   "accounts.noToken": "No Token",
   "accounts.expired": "Expired",
   "accounts.disabled": "Disabled",

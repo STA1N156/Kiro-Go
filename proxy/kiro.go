@@ -484,6 +484,10 @@ endpointLoop:
 				return nil
 			}
 			lastErr = err
+			// Empty output cools down this account/model; do not retry it here.
+			if errors.Is(err, errEmptyKiroStream) {
+				return err
+			}
 			// "Emitted" deliberately means that an output callback ran. This
 			// conservative boundary also protects buffered/non-stream callers:
 			// retrying after their callback mutated state would concatenate two
