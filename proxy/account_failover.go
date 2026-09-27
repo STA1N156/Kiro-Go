@@ -21,7 +21,7 @@ func (h *Handler) callKiroAPI(account *config.Account, payload *KiroPayload, cal
 	}
 	err := CallKiroAPI(account, payload, callback)
 	if errors.Is(err, errEmptyKiroStream) {
-		until := h.pool.CooldownModel(account.ID, model, 20*time.Minute)
+		until := h.pool.CooldownModel(account.ID, model, 8*time.Minute)
 		logger.Warnf("[AccountFailover] Account %s model %s returned no output; cooling down until %s", account.ID, model, until.UTC().Format(time.RFC3339))
 	}
 	return err

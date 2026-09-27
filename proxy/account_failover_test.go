@@ -117,8 +117,8 @@ func TestEmptyStreamModelCooldownAcrossAPIs(t *testing.T) {
 				if calls[first+"claude-opus-5.5"] != 1 {
 					t.Fatal("empty account was retried across endpoints")
 				}
-				if remaining := time.Until(p.ModelCooldownUntil(first, "claude-opus-5.5")); remaining < 19*time.Minute || remaining > 20*time.Minute {
-					t.Fatalf("expected 20-minute cooldown: %s", remaining)
+				if remaining := time.Until(p.ModelCooldownUntil(first, "claude-opus-5.5")); remaining < 8*time.Minute-time.Second || remaining > 8*time.Minute {
+					t.Fatalf("expected 8-minute cooldown: %s", remaining)
 				}
 				// The account cards must expose cooldowns from tests as well as public requests.
 				config.SetModelCooldown(first, "expired-model", time.Now().Add(-time.Second))

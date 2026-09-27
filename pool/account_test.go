@@ -274,8 +274,8 @@ func TestModelCooldownIsolationAndPersistence(t *testing.T) {
 	p := newTestPool()
 	p.Reload()
 	before, _ := os.ReadFile(path)
-	until := p.CooldownModel("a", "CLAUDE-OPUS-5.5", 20*time.Minute)
-	if remaining := time.Until(until); remaining < 20*time.Minute-time.Second || remaining > 20*time.Minute {
+	until := p.CooldownModel("a", "CLAUDE-OPUS-5.5", 8*time.Minute)
+	if remaining := time.Until(until); remaining < 8*time.Minute-time.Second || remaining > 8*time.Minute {
 		t.Fatalf("wrong cooldown duration: %s", remaining)
 	}
 	after, _ := os.ReadFile(path)
