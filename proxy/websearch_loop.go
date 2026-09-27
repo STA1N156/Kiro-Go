@@ -148,7 +148,7 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 	excluded := make(map[string]bool)
 	var lastErr error
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
 		account := h.pool.GetNextForModelExcluding(req.Model, excluded)
 		if account == nil {
 			break

@@ -945,7 +945,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		messageStarted = true
 	}
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
@@ -1492,7 +1492,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	var lastErr error
 	reqStart := time.Now()
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
@@ -1663,7 +1663,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	var lastErr error
 	reqStart := time.Now()
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
@@ -2024,7 +2024,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	var lastErr error
 	reqStart := time.Now()
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
@@ -3826,13 +3826,14 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":               config.GetApiKey(),
-		"requireApiKey":        config.IsApiKeyRequired(),
-		"port":                 config.GetPort(),
-		"host":                 config.GetHost(),
-		"allowOverUsage":       config.GetAllowOverUsage(),
-		"localCache":           config.GetLocalCacheSettings(),
-		"modelCooldownMinutes": config.GetModelCooldownMinutes(),
+		"apiKey":                  config.GetApiKey(),
+		"requireApiKey":           config.IsApiKeyRequired(),
+		"port":                    config.GetPort(),
+		"host":                    config.GetHost(),
+		"allowOverUsage":          config.GetAllowOverUsage(),
+		"localCache":              config.GetLocalCacheSettings(),
+		"modelCooldownSeconds":    config.GetModelCooldownSeconds(),
+		"maxAccountRetryAttempts": config.GetMaxAccountRetryAttempts(),
 	})
 }
 
@@ -3881,12 +3882,13 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey               *string                    `json:"apiKey,omitempty"`
-		RequireApiKey        *bool                      `json:"requireApiKey,omitempty"`
-		Password             string                     `json:"password,omitempty"`
-		AllowOverUsage       *bool                      `json:"allowOverUsage,omitempty"`
-		LocalCache           *config.LocalCacheSettings `json:"localCache,omitempty"`
-		ModelCooldownMinutes *int                       `json:"modelCooldownMinutes,omitempty"`
+		ApiKey                  *string                    `json:"apiKey,omitempty"`
+		RequireApiKey           *bool                      `json:"requireApiKey,omitempty"`
+		Password                string                     `json:"password,omitempty"`
+		AllowOverUsage          *bool                      `json:"allowOverUsage,omitempty"`
+		LocalCache              *config.LocalCacheSettings `json:"localCache,omitempty"`
+		ModelCooldownSeconds    *int                       `json:"modelCooldownSeconds,omitempty"`
+		MaxAccountRetryAttempts *int                       `json:"maxAccountRetryAttempts,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3894,9 +3896,14 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ModelCooldownMinutes != nil && (*req.ModelCooldownMinutes < 1 || *req.ModelCooldownMinutes > 10080) {
+	if req.ModelCooldownSeconds != nil && (*req.ModelCooldownSeconds < 1 || *req.ModelCooldownSeconds > 604800) {
 		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Model cooldown must be 1–10080 minutes"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Model cooldown must be 1–604800 seconds"})
+		return
+	}
+	if req.MaxAccountRetryAttempts != nil && (*req.MaxAccountRetryAttempts < 1 || *req.MaxAccountRetryAttempts > 100) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account attempts must be 1–100"})
 		return
 	}
 	if req.LocalCache != nil {
@@ -3911,7 +3918,7 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := config.UpdateSettingsPatch(req.ApiKey, req.RequireApiKey, req.Password, req.ModelCooldownMinutes); err != nil {
+	if err := config.UpdateSettingsPatch(req.ApiKey, req.RequireApiKey, req.Password, req.ModelCooldownSeconds, req.MaxAccountRetryAttempts); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

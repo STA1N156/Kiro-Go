@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func TestModelCooldownSettingsAPI(t *testing.T) {
+func TestRetrySettingsAPI(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatal(err)
 	}
@@ -26,24 +26,29 @@ func TestModelCooldownSettingsAPI(t *testing.T) {
 		h.handleAdminAPI(w, r)
 		return w
 	}
-	if w := request("GET", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"modelCooldownMinutes":3`) {
+	if w := request("GET", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"modelCooldownSeconds":60`) || !strings.Contains(w.Body.String(), `"maxAccountRetryAttempts":7`) {
 		t.Fatalf("wrong default: %d %s", w.Code, w.Body.String())
 	}
-	for _, body := range []string{`{"modelCooldownMinutes":1}`, `{"modelCooldownMinutes":10080}`, `{"modelCooldownMinutes":8}`, `{}`} {
+	for _, body := range []string{`{"modelCooldownSeconds":1,"maxAccountRetryAttempts":1}`, `{"modelCooldownSeconds":604800,"maxAccountRetryAttempts":100}`, `{"modelCooldownSeconds":45}`, `{"maxAccountRetryAttempts":10}`, `{}`} {
 		if w := request("POST", body); w.Code != 200 {
 			t.Fatalf("save failed: %d %s", w.Code, w.Body.String())
 		}
 	}
-	for _, body := range []string{`{"modelCooldownMinutes":0}`, `{"modelCooldownMinutes":-1}`, `{"modelCooldownMinutes":10081}`, `{"modelCooldownMinutes":1.5}`, `{"modelCooldownMinutes":"3"}`} {
-		if w := request("POST", body); w.Code != 400 || config.GetModelCooldownMinutes() != 8 {
-			t.Fatalf("invalid duration accepted: %s (%d)", body, w.Code)
+	for _, body := range []string{
+		`{"modelCooldownSeconds":0}`, `{"modelCooldownSeconds":-1}`, `{"modelCooldownSeconds":604801}`,
+		`{"modelCooldownSeconds":1.5}`, `{"modelCooldownSeconds":"60"}`,
+		`{"maxAccountRetryAttempts":0,"modelCooldownSeconds":30}`, `{"maxAccountRetryAttempts":-1}`,
+		`{"maxAccountRetryAttempts":101}`, `{"maxAccountRetryAttempts":1.5}`, `{"maxAccountRetryAttempts":"7"}`,
+	} {
+		if w := request("POST", body); w.Code != 400 || config.GetModelCooldownSeconds() != 45 || config.GetMaxAccountRetryAttempts() != 10 {
+			t.Fatalf("invalid settings accepted: %s (%d)", body, w.Code)
 		}
 	}
 	if err := config.Load(); err != nil {
 		t.Fatal(err)
 	}
-	if w := request("GET", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"modelCooldownMinutes":8`) {
-		t.Fatalf("saved duration lost: %d %s", w.Code, w.Body.String())
+	if w := request("GET", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"modelCooldownSeconds":45`) || !strings.Contains(w.Body.String(), `"maxAccountRetryAttempts":10`) {
+		t.Fatalf("saved settings lost: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -98,10 +103,10 @@ func TestEmptyStreamModelCooldownAcrossAPIs(t *testing.T) {
 					t.Fatal(err)
 				}
 				// Exercise both the default and a saved custom duration across all APIs.
-				cooldownMinutes := 3
+				cooldownSeconds := 60
 				if stream {
-					cooldownMinutes = 8
-					if err := config.UpdateSettingsPatch(nil, nil, "", &cooldownMinutes); err != nil {
+					cooldownSeconds = 45
+					if err := config.UpdateSettingsPatch(nil, nil, "", &cooldownSeconds, nil); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -159,9 +164,9 @@ func TestEmptyStreamModelCooldownAcrossAPIs(t *testing.T) {
 				if calls[first+"claude-opus-5.5"] != 1 {
 					t.Fatal("empty account was retried across endpoints")
 				}
-				wantDuration := time.Duration(cooldownMinutes) * time.Minute
+				wantDuration := time.Duration(cooldownSeconds) * time.Second
 				if remaining := time.Until(p.ModelCooldownUntil(first, "claude-opus-5.5")); remaining < wantDuration-time.Second || remaining > wantDuration {
-					t.Fatalf("expected %d-minute cooldown: %s", cooldownMinutes, remaining)
+					t.Fatalf("expected %d-second cooldown: %s", cooldownSeconds, remaining)
 				}
 				// The account cards must expose cooldowns from tests as well as public requests.
 				config.SetModelCooldown(first, "expired-model", time.Now().Add(-time.Second))
@@ -239,23 +244,39 @@ func TestAccountRetryLimit(t *testing.T) {
 					response.StatusCode = http.StatusInternalServerError
 					return response, nil
 				}))
-				body, _ := json.Marshal(map[string]interface{}{"model": "claude-opus-5.5", "max_tokens": 2048, "stream": stream, "messages": []map[string]string{{"role": "user", "content": "hello"}}, "input": "hello", "store": false})
-				r := httptest.NewRequest("POST", "/", bytes.NewReader(body))
-				w := httptest.NewRecorder()
-				switch protocol {
-				case "claude":
-					h.handleClaudeMessages(w, r)
-				case "openai":
-					h.handleOpenAIChat(w, r)
-				case "responses":
-					h.handleOpenAIResponses(w, r)
-				}
-				if len(calls) != 10 {
-					t.Fatalf("expected 10 distinct credentials including the first, got %v", calls)
-				}
-				for id, count := range calls {
-					if count != 1 {
-						t.Fatalf("credential %s attempted %d times", id, count)
+				// Zero here means no saved setting, so the default must be seven.
+				for _, limit := range []int{0, 1, 10, 100} {
+					if limit != 0 {
+						if err := config.UpdateSettingsPatch(nil, nil, "", nil, &limit); err != nil {
+							t.Fatal(err)
+						}
+					}
+					for _, account := range config.GetAccounts() {
+						p.RecordSuccess(account.ID)
+					}
+					clear(calls)
+					body, _ := json.Marshal(map[string]interface{}{"model": "claude-opus-5.5", "max_tokens": 2048, "stream": stream, "messages": []map[string]string{{"role": "user", "content": "hello"}}, "input": "hello", "store": false})
+					r := httptest.NewRequest("POST", "/", bytes.NewReader(body))
+					w := httptest.NewRecorder()
+					switch protocol {
+					case "claude":
+						h.handleClaudeMessages(w, r)
+					case "openai":
+						h.handleOpenAIChat(w, r)
+					case "responses":
+						h.handleOpenAIResponses(w, r)
+					}
+					want := min(limit, 11)
+					if limit == 0 {
+						want = 7
+					}
+					if len(calls) != want {
+						t.Fatalf("limit %d: expected %d distinct credentials including the first, got %v", limit, want, calls)
+					}
+					for id, count := range calls {
+						if count != 1 {
+							t.Fatalf("credential %s attempted %d times", id, count)
+						}
 					}
 				}
 			})

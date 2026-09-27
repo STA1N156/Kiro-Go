@@ -9,39 +9,83 @@ import (
 	"time"
 )
 
-func TestModelCooldownMinutesSettings(t *testing.T) {
+func TestRetrySettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := GetModelCooldownMinutes(); got != 3 {
-		t.Fatalf("default = %d, want 3", got)
+	if GetModelCooldownSeconds() != 60 || GetMaxAccountRetryAttempts() != 7 {
+		t.Fatal("defaults must be 60 seconds and 7 attempts")
 	}
 	until := time.Now().Add(time.Hour).Unix()
 	SetModelCooldown("account", "claude-opus-5.5", time.Unix(until, 0))
-	minutes := 8
-	if err := UpdateSettingsPatch(nil, nil, "", &minutes); err != nil {
+	seconds, attempts := 45, 10
+	if err := UpdateSettingsPatch(nil, nil, "", &seconds, &attempts); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateSettingsPatch(nil, nil, "new-password", nil); err != nil {
+	if err := UpdateSettingsPatch(nil, nil, "new-password", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := Load(); err != nil {
 		t.Fatal(err)
 	}
-	if GetModelCooldownMinutes() != 8 || len(GetModelCooldowns()) != 1 || GetModelCooldowns()[0].Until != until {
+	if GetModelCooldownSeconds() != 45 || GetMaxAccountRetryAttempts() != 10 || len(GetModelCooldowns()) != 1 || GetModelCooldowns()[0].Until != until {
 		t.Fatal("settings were lost or existing cooldown deadline changed")
 	}
-	for _, invalid := range []int{-1, 0, 10081} {
-		if err := UpdateSettingsPatch(nil, nil, "", &invalid); err == nil || GetModelCooldownMinutes() != 8 {
+	for _, invalid := range []int{-1, 0, 604801} {
+		if err := UpdateSettingsPatch(nil, nil, "", &invalid, nil); err == nil || GetModelCooldownSeconds() != 45 {
 			t.Fatalf("invalid duration %d was not rejected", invalid)
+		}
+	}
+	for _, invalid := range []int{-1, 0, 101} {
+		if err := UpdateSettingsPatch(nil, nil, "", nil, &invalid); err == nil || GetMaxAccountRetryAttempts() != 10 {
+			t.Fatalf("invalid attempt limit %d was not rejected", invalid)
 		}
 	}
 	cfgPath = filepath.Join(t.TempDir(), "missing", "config.json")
 	t.Cleanup(func() { cfgPath = path })
-	minutes = 5
-	if err := UpdateSettingsPatch(nil, nil, "", &minutes); err == nil || GetModelCooldownMinutes() != 8 {
-		t.Fatal("failed save changed active cooldown duration")
+	seconds, attempts = 30, 2
+	if err := UpdateSettingsPatch(nil, nil, "", &seconds, &attempts); err == nil || GetModelCooldownSeconds() != 45 || GetMaxAccountRetryAttempts() != 10 {
+		t.Fatal("failed save changed active retry settings")
+	}
+}
+
+func TestModelCooldownSecondsMigration(t *testing.T) {
+	for _, tc := range []struct {
+		name, json string
+		seconds    int
+	}{
+		{"old-default", `{}`, 60},
+		{"saved-minutes", `{"modelCooldownMinutes":8}`, 480},
+		{"maximum-minutes", `{"modelCooldownMinutes":10080}`, 604800},
+		{"invalid-minutes", `{"modelCooldownMinutes":10081}`, 60},
+		{"seconds-win", `{"modelCooldownMinutes":8,"modelCooldownSeconds":45}`, 45},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.json), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := Init(path); err != nil {
+				t.Fatal(err)
+			}
+			if GetModelCooldownSeconds() != tc.seconds || GetMaxAccountRetryAttempts() != 7 {
+				t.Fatal("wrong migrated settings")
+			}
+			if err := UpdateSettingsPatch(nil, nil, "", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte("modelCooldownMinutes")) {
+				t.Fatal("obsolete minutes setting was saved again")
+			}
+			if err := Load(); err != nil || GetModelCooldownSeconds() != tc.seconds {
+				t.Fatal("migration did not survive reload")
+			}
+		})
 	}
 }
 
@@ -205,7 +249,7 @@ func TestUsageSnapshotPreservesNewUsageAndSettings(t *testing.T) {
 	if err := ResetApiKeyUsage(key.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateSettingsPatch(nil, nil, "new-password", nil); err != nil {
+	if err := UpdateSettingsPatch(nil, nil, "new-password", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := commitStatsSnapshot(tmp, path, revision, usageRevision); err != nil {
@@ -317,7 +361,7 @@ func TestUpdateSettingsPatchPreservesOmittedAPIKeyFields(t *testing.T) {
 		t.Fatalf("seed settings: %v", err)
 	}
 
-	if err := UpdateSettingsPatch(nil, nil, "new-admin-password", nil); err != nil {
+	if err := UpdateSettingsPatch(nil, nil, "new-admin-password", nil, nil); err != nil {
 		t.Fatalf("patch settings: %v", err)
 	}
 
@@ -342,7 +386,7 @@ func TestUpdateSettingsPatchCanExplicitlyDisableAPIKey(t *testing.T) {
 
 	emptyKey := ""
 	requireAPIKey := false
-	if err := UpdateSettingsPatch(&emptyKey, &requireAPIKey, "", nil); err != nil {
+	if err := UpdateSettingsPatch(&emptyKey, &requireAPIKey, "", nil, nil); err != nil {
 		t.Fatalf("patch settings: %v", err)
 	}
 

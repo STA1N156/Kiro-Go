@@ -134,7 +134,7 @@ func (h *Handler) handleResponsesNonStream(
 	var lastErr error
 	reqStart := time.Now()
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
@@ -332,7 +332,7 @@ func (h *Handler) handleResponsesStream(
 	responseStarted := false
 	reqStart := time.Now()
 
-	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
+	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break

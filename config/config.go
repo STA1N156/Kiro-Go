@@ -179,18 +179,19 @@ type ModelCooldown struct {
 // Config represents the global application configuration.
 type Config struct {
 	// Server settings
-	Password             string          `json:"password"`          // Admin panel password
-	Port                 int             `json:"port"`              // HTTP server port (default: 8080)
-	Host                 string          `json:"host"`              // HTTP server bind address (default: 0.0.0.0)
-	ApiKey               string          `json:"apiKey,omitempty"`  // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
-	RequireApiKey        bool            `json:"requireApiKey"`     // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
-	ApiKeys              []ApiKeyEntry   `json:"apiKeys,omitempty"` // Multiple API keys, each with independent quota
-	KiroVersion          string          `json:"kiroVersion,omitempty"`
-	SystemVersion        string          `json:"systemVersion,omitempty"`
-	NodeVersion          string          `json:"nodeVersion,omitempty"`
-	Accounts             []Account       `json:"accounts"` // Registered Kiro accounts
-	ModelCooldowns       []ModelCooldown `json:"modelCooldowns,omitempty"`
-	ModelCooldownMinutes int             `json:"modelCooldownMinutes,omitempty"`
+	Password                string          `json:"password"`          // Admin panel password
+	Port                    int             `json:"port"`              // HTTP server port (default: 8080)
+	Host                    string          `json:"host"`              // HTTP server bind address (default: 0.0.0.0)
+	ApiKey                  string          `json:"apiKey,omitempty"`  // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
+	RequireApiKey           bool            `json:"requireApiKey"`     // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
+	ApiKeys                 []ApiKeyEntry   `json:"apiKeys,omitempty"` // Multiple API keys, each with independent quota
+	KiroVersion             string          `json:"kiroVersion,omitempty"`
+	SystemVersion           string          `json:"systemVersion,omitempty"`
+	NodeVersion             string          `json:"nodeVersion,omitempty"`
+	Accounts                []Account       `json:"accounts"` // Registered Kiro accounts
+	ModelCooldowns          []ModelCooldown `json:"modelCooldowns,omitempty"`
+	ModelCooldownSeconds    int             `json:"modelCooldownSeconds,omitempty"`
+	MaxAccountRetryAttempts int             `json:"maxAccountRetryAttempts,omitempty"`
 
 	// Thinking mode configuration for extended reasoning output
 	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
@@ -312,11 +313,17 @@ func loadLocked() error {
 		return err
 	}
 
-	var c Config
+	var c struct {
+		Config
+		ModelCooldownMinutes int `json:"modelCooldownMinutes"` // Legacy storage only.
+	}
 	if err := json.Unmarshal(data, &c); err != nil {
 		return err
 	}
-	cfg = &c
+	if c.ModelCooldownSeconds == 0 && c.ModelCooldownMinutes >= 1 && c.ModelCooldownMinutes <= 10080 {
+		c.ModelCooldownSeconds = c.ModelCooldownMinutes * 60
+	}
+	cfg = &c.Config
 	statsRevision, savedStatsRevision = 0, 0
 
 	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
@@ -933,9 +940,12 @@ func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
 	return Save()
 }
 
-func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string, modelCooldownMinutes *int) error {
-	if modelCooldownMinutes != nil && (*modelCooldownMinutes < 1 || *modelCooldownMinutes > 10080) {
-		return fmt.Errorf("model cooldown must be 1–10080 minutes")
+func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string, modelCooldownSeconds, maxAccountRetryAttempts *int) error {
+	if modelCooldownSeconds != nil && (*modelCooldownSeconds < 1 || *modelCooldownSeconds > 604800) {
+		return fmt.Errorf("model cooldown must be 1–604800 seconds")
+	}
+	if maxAccountRetryAttempts != nil && (*maxAccountRetryAttempts < 1 || *maxAccountRetryAttempts > 100) {
+		return fmt.Errorf("account attempts must be 1–100")
 	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -949,8 +959,11 @@ func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string, m
 	if password != "" {
 		cfg.Password = password
 	}
-	if modelCooldownMinutes != nil {
-		cfg.ModelCooldownMinutes = *modelCooldownMinutes
+	if modelCooldownSeconds != nil {
+		cfg.ModelCooldownSeconds = *modelCooldownSeconds
+	}
+	if maxAccountRetryAttempts != nil {
+		cfg.MaxAccountRetryAttempts = *maxAccountRetryAttempts
 	}
 	if err := Save(); err != nil {
 		*cfg = previous

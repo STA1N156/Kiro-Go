@@ -46,13 +46,22 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 	return commitStatsSnapshot(tmp, path, revision, usageRevision)
 }
 
-func GetModelCooldownMinutes() int {
+func GetModelCooldownSeconds() int {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	if cfg == nil || cfg.ModelCooldownMinutes < 1 || cfg.ModelCooldownMinutes > 10080 {
-		return 3
+	if cfg == nil || cfg.ModelCooldownSeconds < 1 || cfg.ModelCooldownSeconds > 604800 {
+		return 60
 	}
-	return cfg.ModelCooldownMinutes
+	return cfg.ModelCooldownSeconds
+}
+
+func GetMaxAccountRetryAttempts() int {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.MaxAccountRetryAttempts < 1 || cfg.MaxAccountRetryAttempts > 100 {
+		return 7
+	}
+	return cfg.MaxAccountRetryAttempts
 }
 
 // Model cooldowns share the existing batched save, never writing on the request path.

@@ -959,10 +959,11 @@
         if (!box.querySelector('.account-cooldown-row')) box.remove();
         return;
       }
-      const totalMinutes = Math.ceil(remaining / 60);
-      const hours = Math.floor(totalMinutes / 60);
-      const minutes = totalMinutes % 60;
-      const duration = [hours ? hours + t('time.hours') : '', minutes ? minutes + t('time.minutes') : ''].filter(Boolean).join(' ');
+      const totalSeconds = Math.ceil(remaining);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor(totalSeconds / 60) % 60;
+      const seconds = totalSeconds % 60;
+      const duration = [hours ? hours + t('time.hours') : '', minutes ? minutes + t('time.minutes') : '', seconds ? seconds + t('time.seconds') : ''].filter(Boolean).join(' ');
       row.querySelector('.account-cooldown-time').textContent = t('accounts.cooldownRemaining', duration);
     });
   }
@@ -1614,7 +1615,8 @@
     $('allowOverUsage').checked = d.allowOverUsage || false;
     $('localCacheEnabled').checked = d.localCache?.enabled !== false;
     $('localCacheTTL').value = d.localCache?.ttlMinutes ?? 5;
-    $('modelCooldownMinutes').value = d.modelCooldownMinutes ?? 3;
+    $('modelCooldownSeconds').value = d.modelCooldownSeconds ?? 60;
+    $('maxAccountRetryAttempts').value = d.maxAccountRetryAttempts ?? 7;
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
@@ -1774,19 +1776,24 @@
       toastError((e && e.message) || t('common.failed'));
     }
   }
-  async function saveModelCooldown() {
-    const minutes = Number($('modelCooldownMinutes').value);
-    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) {
+  async function saveRetrySettings() {
+    const seconds = Number($('modelCooldownSeconds').value);
+    const attempts = Number($('maxAccountRetryAttempts').value);
+    if (!Number.isInteger(attempts) || attempts < 1 || attempts > 100) {
+      toast(t('settings.accountRetryInvalid'), 'warning');
+      return;
+    }
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 604800) {
       toast(t('settings.modelCooldownInvalid'), 'warning');
       return;
     }
-    const button = $('saveModelCooldownBtn');
+    const button = $('saveRetrySettingsBtn');
     button.disabled = true;
     try {
-      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ modelCooldownMinutes: minutes }) });
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ modelCooldownSeconds: seconds, maxAccountRetryAttempts: attempts }) });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || t('common.saveFailed'));
-      toastPrimary(t('settings.modelCooldownSaved'));
+      toastPrimary(t('settings.retrySettingsSaved'));
     } catch (e) {
       toastError((e && e.message) || t('common.saveFailed'));
     } finally {
@@ -3334,7 +3341,7 @@
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
     $('resetStatsBtn').addEventListener('click', resetStats);
     $('resetCooldownsBtn').addEventListener('click', resetCooldowns);
-    $('saveModelCooldownBtn').addEventListener('click', saveModelCooldown);
+    $('saveRetrySettingsBtn').addEventListener('click', saveRetrySettings);
     bindApiKeyEvents();
   }
 

@@ -32,7 +32,7 @@ func mustInitConfig(t *testing.T) {
 func requireAuth(t *testing.T) {
 	t.Helper()
 	on := true
-	if err := config.UpdateSettingsPatch(nil, &on, "", nil); err != nil {
+	if err := config.UpdateSettingsPatch(nil, &on, "", nil, nil); err != nil {
 		t.Fatalf("set requireApiKey=true: %v", err)
 	}
 }

@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-const maxAccountRetryAttempts = 10
-
 var errModelCooldown = errors.New("account model is cooling down")
 
 // All generation paths, including admin tests, share model-specific empty-stream handling.
@@ -21,7 +19,7 @@ func (h *Handler) callKiroAPI(account *config.Account, payload *KiroPayload, cal
 	}
 	err := CallKiroAPI(account, payload, callback)
 	if errors.Is(err, errEmptyKiroStream) {
-		until := h.pool.CooldownModel(account.ID, model, time.Duration(config.GetModelCooldownMinutes())*time.Minute)
+		until := h.pool.CooldownModel(account.ID, model, time.Duration(config.GetModelCooldownSeconds())*time.Second)
 		logger.Warnf("[AccountFailover] Account %s model %s returned no output; cooling down until %s", account.ID, model, until.UTC().Format(time.RFC3339))
 	}
 	return err
