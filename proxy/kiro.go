@@ -481,6 +481,11 @@ endpointLoop:
 				return nil
 			}
 			lastErr = err
+			// A clean but empty response removes this account/model from scheduling.
+			// Return immediately so the handler can cool it down and try another account.
+			if errors.Is(err, errEmptyKiroStream) {
+				return err
+			}
 			// "Emitted" deliberately means that an output callback ran. This
 			// conservative boundary also protects buffered/non-stream callers:
 			// retrying after their callback mutated state would concatenate two

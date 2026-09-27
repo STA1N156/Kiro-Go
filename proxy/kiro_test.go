@@ -460,7 +460,7 @@ func TestParseEventStreamTrackedRejectsIncompleteToolOnCleanEOF(t *testing.T) {
 	}
 }
 
-func TestCallKiroAPIRetriesAPIKeyEndpointAfterEmptyStream(t *testing.T) {
+func TestCallKiroAPIRetriesAPIKeyEndpointAfterTruncatedStream(t *testing.T) {
 	var calls, completed int
 	var text string
 	var attempts, invocationIDs, hosts []string
@@ -470,7 +470,7 @@ func TestCallKiroAPIRetriesAPIKeyEndpointAfterEmptyStream(t *testing.T) {
 		invocationIDs = append(invocationIDs, req.Header.Get("Amz-Sdk-Invocation-Id"))
 		hosts = append(hosts, req.URL.Host)
 		if calls == 1 {
-			return kiroStreamTestResponse(bytes.NewReader(nil)), nil
+			return kiroStreamTestResponse(&truncatedReader{data: []byte{0, 0, 1}, err: io.ErrUnexpectedEOF}), nil
 		}
 		return kiroStreamTestResponse(bytes.NewReader(awsEventStreamFrame(t,
 			"assistantResponseEvent", map[string]interface{}{"content": "recovered"}))), nil

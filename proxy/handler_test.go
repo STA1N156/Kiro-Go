@@ -555,6 +555,22 @@ func TestNativeThinkingFields(t *testing.T) {
 			t.Fatalf("plain models must explicitly disable thinking: %#v", fields)
 		}
 	}
+	for _, enabled := range []bool{false, true} {
+		wantEffort := "low"
+		if enabled {
+			wantEffort = "high"
+		}
+		for _, payload := range []*KiroPayload{
+			ClaudeToKiro(&ClaudeRequest{Model: "claude-opus-5.5", Messages: []ClaudeMessage{{Role: "user", Content: "hello"}}}, enabled),
+			OpenAIToKiro(&OpenAIRequest{Model: "claude-opus-5.5", Messages: []OpenAIMessage{{Role: "user", Content: "hello"}}}, enabled),
+		} {
+			fields := payload.AdditionalModelRequestFields
+			thinking := fields["thinking"].(ClaudeThinkingConfig)
+			if thinking.Type != "adaptive" || thinking.Display != "summarized" || fields["output_config"].(map[string]string)["effort"] != wantEffort {
+				t.Fatalf("Opus 5.5 must use adaptive/%s: %#v", wantEffort, fields)
+			}
+		}
+	}
 }
 
 func TestValidateClaudeThinkingConfig(t *testing.T) {

@@ -14,13 +14,14 @@ const tokenRefreshSkewSeconds int64 = 120
 
 // AccountPool 账号池
 type AccountPool struct {
-	mu            sync.RWMutex
-	accounts      []config.Account
-	totalAccounts int
-	currentIndex  uint64
-	cooldowns     map[string]time.Time       // 账号冷却时间
-	errorCounts   map[string]int             // 连续错误计数
-	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	mu             sync.RWMutex
+	accounts       []config.Account
+	totalAccounts  int
+	currentIndex   uint64
+	cooldowns      map[string]time.Time       // 账号冷却时间
+	errorCounts    map[string]int             // 连续错误计数
+	modelLists     map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	modelCooldowns map[[2]string]time.Time    // Hard per-account/model cooldown; never bypassed by fallback.
 }
 
 var (
@@ -63,6 +64,14 @@ func (p *AccountPool) Reload() {
 	}
 	p.accounts = weighted
 	p.totalAccounts = len(enabled)
+	p.modelCooldowns = make(map[[2]string]time.Time)
+	now := time.Now()
+	for _, entry := range config.GetModelCooldowns() {
+		until := time.Unix(entry.Until, 0)
+		if now.Before(until) {
+			p.modelCooldowns[[2]string{entry.AccountID, entry.Model}] = until
+		}
+	}
 }
 
 // GetNext 获取下一个可用账号（加权轮询）
@@ -189,6 +198,7 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	model = strings.ToLower(strings.TrimSpace(model))
 
 	if len(p.accounts) == 0 {
 		return nil
@@ -210,7 +220,7 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		if seen[acc.ID] {
 			continue
 		}
-		if !p.accountHasModel(acc.ID, model) {
+		if !p.accountHasModel(acc.ID, model) || now.Before(p.modelCooldowns[[2]string{acc.ID, model}]) {
 			seen[acc.ID] = true
 			continue
 		}
@@ -237,7 +247,7 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		if excluded != nil && excluded[acc.ID] {
 			continue
 		}
-		if !p.accountHasModel(acc.ID, model) {
+		if !p.accountHasModel(acc.ID, model) || now.Before(p.modelCooldowns[[2]string{acc.ID, model}]) {
 			continue
 		}
 		if isQuotaBlocked(*acc, allowOverUsage) {
@@ -253,6 +263,31 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		}
 	}
 	return best
+}
+
+func (p *AccountPool) ModelCooldownUntil(id, model string) time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.modelCooldowns[[2]string{id, strings.ToLower(strings.TrimSpace(model))}]
+}
+
+func (p *AccountPool) CooldownModel(id, model string, duration time.Duration) time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	model = strings.ToLower(strings.TrimSpace(model))
+	if p.modelCooldowns == nil {
+		p.modelCooldowns = make(map[[2]string]time.Time)
+	}
+	now := time.Now()
+	for key, until := range p.modelCooldowns {
+		if !now.Before(until) {
+			delete(p.modelCooldowns, key)
+		}
+	}
+	until := now.Add(duration)
+	p.modelCooldowns[[2]string{id, model}] = until
+	config.SetModelCooldown(id, model, until)
+	return until
 }
 
 // GetByID 根据 ID 获取账号

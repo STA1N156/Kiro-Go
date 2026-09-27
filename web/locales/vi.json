@@ -38,6 +38,8 @@
   "accounts.tokens": "Tokens",
   "accounts.credits": "Credits",
   "accounts.expiry": "Hết hạn",
+  "accounts.modelCooldown": "Mô hình đang tạm nghỉ",
+  "accounts.cooldownRemaining": "Còn {0}",
   "accounts.noToken": "Không có Token",
   "accounts.expired": "Đã hết hạn",
   "accounts.disabled": "Đã tắt",

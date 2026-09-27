@@ -100,12 +100,16 @@ func nativeThinkingFields(model string, thinking bool) map[string]interface{} {
 	if !strings.HasPrefix(strings.ToLower(model), "claude-") {
 		return nil
 	}
-	if !thinking {
+	if !thinking && !strings.EqualFold(model, "claude-opus-5.5") {
 		return map[string]interface{}{"thinking": ClaudeThinkingConfig{Type: "disabled"}}
+	}
+	effort := "high"
+	if !thinking {
+		effort = "low" // Opus 5.5 only accepts adaptive thinking.
 	}
 	return map[string]interface{}{
 		"thinking":      ClaudeThinkingConfig{Type: "adaptive", Display: "summarized"},
-		"output_config": map[string]string{"effort": "high"},
+		"output_config": map[string]string{"effort": effort},
 	}
 }
 

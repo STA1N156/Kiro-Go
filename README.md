@@ -115,6 +115,10 @@ API Key accounts call the Kiro CLI runtime (`https://runtime.{region}.kiro.dev/`
 
 For Claude models, the model-name suffix (default `-thinking`) is the switch: `claude-opus-4.6-thinking` sends native `thinking.type: adaptive`, `thinking.display: summarized`, and `output_config.effort: high`; the same name without the suffix explicitly sends `thinking.type: disabled`. Client-side `thinking` settings do not override this rule. No thinking prompt is injected. Upstream reasoning content is forwarded even if it unexpectedly arrives for a plain model or the client requests `display: omitted`. Chat Completions and Claude output formats remain configurable under Settings - Thinking Mode; Responses uses reasoning summary items and streaming events. Claude-specific request parameters are not added to other model families.
 
+Opus 5.5 is an exception because its upstream rejects disabled thinking: without the configured suffix it uses native `adaptive + low`; with the suffix it uses `adaptive + high`. Returned reasoning remains visible in both modes.
+
+If an account returns an empty generation stream (no text, reasoning, or complete tool call), that account is excluded from the affected model for three hours. Other models on that account remain available. Plain and thinking variants share the same model cooldown; account fallback and admin test calls cannot bypass it. The failed request can try another eligible account within the existing retry budget. Account cards show cooling models and their remaining time, and refresh after admin tests. Cooldowns expire automatically and are persisted by the existing batched save (normally within three seconds), so saved cooldowns survive restarts.
+
 ## Outbound Proxy
 
 For users in restricted network regions, configure an outbound proxy in the admin panel under **Settings - Outbound Proxy Settings**. Supports SOCKS5 and HTTP proxies.
