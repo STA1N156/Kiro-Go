@@ -224,7 +224,7 @@ func TestAccountRetryLimit(t *testing.T) {
 				if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 					t.Fatal(err)
 				}
-				for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
+				for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"} {
 					if err := config.AddAccount(config.Account{ID: id, Enabled: true, AuthMethod: "api_key", KiroApiKey: id, ProxyURL: kiroRetryTestProxyURL}); err != nil {
 						t.Fatal(err)
 					}
@@ -250,8 +250,8 @@ func TestAccountRetryLimit(t *testing.T) {
 				case "responses":
 					h.handleOpenAIResponses(w, r)
 				}
-				if len(calls) != 5 {
-					t.Fatalf("expected 5 distinct credentials including the first, got %v", calls)
+				if len(calls) != 10 {
+					t.Fatalf("expected 10 distinct credentials including the first, got %v", calls)
 				}
 				for id, count := range calls {
 					if count != 1 {

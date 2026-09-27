@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const maxAccountRetryAttempts = 5
+const maxAccountRetryAttempts = 10
 
 var errModelCooldown = errors.New("account model is cooling down")
 
