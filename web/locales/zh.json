@@ -38,8 +38,6 @@
   "accounts.tokens": "Tokens",
   "accounts.credits": "Credits",
   "accounts.expiry": "到期",
-  "accounts.modelCooldown": "模型冷却",
-  "accounts.cooldownRemaining": "剩余 {0}",
   "accounts.noToken": "无Token",
   "accounts.expired": "已过期",
   "accounts.disabled": "已禁用",

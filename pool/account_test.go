@@ -1,10 +1,8 @@
 package pool
 
 import (
-	"bytes"
 	"errors"
 	"kiro-go/config"
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -209,63 +207,6 @@ func TestIsSuspensionErrorNilError(t *testing.T) {
 // ---------------------------------------------------------------------------
 // GetNextForModelExcluding
 // ---------------------------------------------------------------------------
-
-func TestModelCooldownIsolationAndPersistence(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Init(path); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"a", "b"} {
-		if err := config.AddAccount(config.Account{ID: id, Enabled: true, Weight: 3}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	p := newTestPool()
-	p.Reload()
-	before, _ := os.ReadFile(path)
-	until := p.CooldownModel("a", "CLAUDE-OPUS-5.5", 3*time.Hour)
-	if remaining := time.Until(until); remaining < 3*time.Hour-time.Second || remaining > 3*time.Hour {
-		t.Fatalf("wrong cooldown duration: %s", remaining)
-	}
-	after, _ := os.ReadFile(path)
-	if !bytes.Equal(before, after) {
-		t.Fatal("model cooldown performed synchronous disk I/O")
-	}
-	for i := 0; i < 8; i++ {
-		if a := p.GetNextForModel("claude-opus-5.5"); a == nil || a.ID != "b" {
-			t.Fatalf("cooled account was scheduled: %#v", a)
-		}
-	}
-	// Even fallback to a globally cooled account must not bypass the model cooldown.
-	p.cooldowns["a"] = time.Now().Add(time.Minute)
-	if a := p.GetNextForModelExcluding("claude-opus-5.5", map[string]bool{"b": true}); a != nil {
-		t.Fatal("fallback bypassed model cooldown")
-	}
-	p.RecordSuccess("a")
-	if a := p.GetNextForModelExcluding("claude-opus-4.6", map[string]bool{"b": true}); a == nil || a.ID != "a" {
-		t.Fatal("cooldown leaked to another model")
-	}
-	p.RecordSuccess("a")
-	p.Reload()
-	if a := p.GetNextForModelExcluding("claude-opus-5.5", map[string]bool{"b": true}); a != nil {
-		t.Fatal("success or reload removed model cooldown")
-	}
-	if err := config.UpdateStats(0, 0, 0, 0, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := config.Init(path); err != nil {
-		t.Fatal(err)
-	}
-	p = newTestPool()
-	p.Reload()
-	if a := p.GetNextForModelExcluding("claude-opus-5.5", map[string]bool{"b": true}); a != nil {
-		t.Fatal("restart lost saved cooldown")
-	}
-	p.modelCooldowns[[2]string{"a", "claude-opus-5.5"}] = time.Now().Add(-time.Second)
-	if a := p.GetNextForModelExcluding("claude-opus-5.5", map[string]bool{"b": true}); a == nil || a.ID != "a" {
-		t.Fatal("expired cooldown still blocks scheduling")
-	}
-}
 
 func newTestPool(accounts ...config.Account) *AccountPool {
 	p := &AccountPool{

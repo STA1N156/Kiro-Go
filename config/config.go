@@ -170,26 +170,19 @@ type ApiKeyEntry struct {
 	RequestsCount int64   `json:"requestsCount,omitempty"`
 }
 
-type ModelCooldown struct {
-	AccountID string `json:"accountId"`
-	Model     string `json:"model"`
-	Until     int64  `json:"until"`
-}
-
 // Config represents the global application configuration.
 type Config struct {
 	// Server settings
-	Password       string          `json:"password"`          // Admin panel password
-	Port           int             `json:"port"`              // HTTP server port (default: 8080)
-	Host           string          `json:"host"`              // HTTP server bind address (default: 0.0.0.0)
-	ApiKey         string          `json:"apiKey,omitempty"`  // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
-	RequireApiKey  bool            `json:"requireApiKey"`     // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
-	ApiKeys        []ApiKeyEntry   `json:"apiKeys,omitempty"` // Multiple API keys, each with independent quota
-	KiroVersion    string          `json:"kiroVersion,omitempty"`
-	SystemVersion  string          `json:"systemVersion,omitempty"`
-	NodeVersion    string          `json:"nodeVersion,omitempty"`
-	Accounts       []Account       `json:"accounts"` // Registered Kiro accounts
-	ModelCooldowns []ModelCooldown `json:"modelCooldowns,omitempty"`
+	Password      string        `json:"password"`          // Admin panel password
+	Port          int           `json:"port"`              // HTTP server port (default: 8080)
+	Host          string        `json:"host"`              // HTTP server bind address (default: 0.0.0.0)
+	ApiKey        string        `json:"apiKey,omitempty"`  // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
+	RequireApiKey bool          `json:"requireApiKey"`     // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
+	ApiKeys       []ApiKeyEntry `json:"apiKeys,omitempty"` // Multiple API keys, each with independent quota
+	KiroVersion   string        `json:"kiroVersion,omitempty"`
+	SystemVersion string        `json:"systemVersion,omitempty"`
+	NodeVersion   string        `json:"nodeVersion,omitempty"`
+	Accounts      []Account     `json:"accounts"` // Registered Kiro accounts
 
 	// Thinking mode configuration for extended reasoning output
 	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")

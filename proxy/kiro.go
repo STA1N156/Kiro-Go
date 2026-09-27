@@ -25,6 +25,9 @@ import (
 )
 
 const (
+	// Total time per upstream generation attempt, including the response body.
+	kiroGenerationTimeout = 15 * time.Minute
+
 	// streamRetryBackoff spaces out a retry of a stream that died before
 	// delivering any output callback. Upstream drops cluster in time, so an
 	// immediate retry tends to hit the same blip.
@@ -102,7 +105,7 @@ func GetClientForProxy(proxyURL string) *http.Client {
 		return cached.(*http.Client)
 	}
 	client := &http.Client{
-		Timeout:   5 * time.Minute,
+		Timeout:   kiroGenerationTimeout,
 		Transport: buildKiroTransport(proxyURL),
 	}
 	proxyClientCache.Store(proxyURL, client)
@@ -160,7 +163,7 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 // InitKiroHttpClient initializes (or reinitializes) the HTTP clients used for Kiro API requests.
 func InitKiroHttpClient(proxyURL string) {
 	client := &http.Client{
-		Timeout:   5 * time.Minute,
+		Timeout:   kiroGenerationTimeout,
 		Transport: buildKiroTransport(proxyURL),
 	}
 	kiroHttpStore.Store(client)
@@ -481,11 +484,6 @@ endpointLoop:
 				return nil
 			}
 			lastErr = err
-			// A clean but empty response removes this account/model from scheduling.
-			// Return immediately so the handler can cool it down and try another account.
-			if errors.Is(err, errEmptyKiroStream) {
-				return err
-			}
 			// "Emitted" deliberately means that an output callback ran. This
 			// conservative boundary also protects buffered/non-stream callers:
 			// retrying after their callback mutated state would concatenate two

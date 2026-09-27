@@ -1249,7 +1249,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1533,7 +1533,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1947,7 +1947,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2058,7 +2058,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2359,13 +2359,6 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 	accounts := config.GetAccounts()
 	poolAccounts := h.pool.GetAllAccounts()
-	cooldowns := make(map[string][]config.ModelCooldown)
-	now := time.Now().Unix()
-	for _, entry := range config.GetModelCooldowns() {
-		if entry.Until > now {
-			cooldowns[entry.AccountID] = append(cooldowns[entry.AccountID], entry)
-		}
-	}
 
 	// 合并运行时统计
 	statsMap := make(map[string]config.Account)
@@ -2420,7 +2413,6 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"totalTokens":       stats.TotalTokens,
 			"totalCredits":      stats.TotalCredits,
 			"lastUsed":          stats.LastUsed,
-			"modelCooldowns":    cooldowns[a.ID],
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -4023,7 +4015,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		OnContextUsage: func(pct float64) {},
 	}
 
-	err := h.callKiroAPI(account, kiroPayload, callback)
+	err := CallKiroAPI(account, kiroPayload, callback)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})

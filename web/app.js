@@ -940,33 +940,6 @@
     });
   }
 
-  function renderModelCooldowns(account) {
-    const active = (account.modelCooldowns || []).filter(c => c.until > Date.now() / 1000);
-    if (!active.length) return '';
-    return '<div class="account-cooldowns"><div class="account-cooldown-label">' +
-      escapeHtml(t('accounts.modelCooldown')) + '</div>' + active.map(c =>
-        '<div class="account-cooldown-row" data-cooldown-until="' + escapeAttr(c.until) + '">' +
-        '<span>' + escapeHtml(c.model) + '</span><span class="account-cooldown-time"></span></div>'
-      ).join('') + '</div>';
-  }
-
-  function updateModelCooldowns() {
-    qsa('.account-cooldown-row').forEach(row => {
-      const remaining = Number(row.dataset.cooldownUntil) - Date.now() / 1000;
-      if (remaining <= 0) {
-        const box = row.parentElement;
-        row.remove();
-        if (!box.querySelector('.account-cooldown-row')) box.remove();
-        return;
-      }
-      const totalMinutes = Math.ceil(remaining / 60);
-      const hours = Math.floor(totalMinutes / 60);
-      const minutes = totalMinutes % 60;
-      const duration = [hours ? hours + t('time.hours') : '', minutes ? minutes + t('time.minutes') : ''].filter(Boolean).join(' ');
-      row.querySelector('.account-cooldown-time').textContent = t('accounts.cooldownRemaining', duration);
-    });
-  }
-
   function renderAccounts() {
     const container = $('accountsList');
     if (!container) return;
@@ -1022,7 +995,6 @@
         '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + idAttr + '">' + escapeHtml(t('accounts.delete')) + '</button>' +
         '</div>' +
         '</div>' +
-        renderModelCooldowns(a) +
         (a.usageLimit > 0 ?
           '<div class="account-usage">' +
           '<div class="usage-label">' + escapeHtml(t('accounts.mainQuota')) + '</div>' +
@@ -1044,7 +1016,6 @@
         '</div>';
     }).join('');
     applyUsageBars(container);
-    updateModelCooldowns();
     enhanceCustomSelects(container);
   }
 
@@ -1603,7 +1574,6 @@
     }
     testModalRunning = false;
     if (modalBtn) modalBtn.removeAttribute('aria-busy');
-    await loadAccounts().catch(() => {});
   }
 
   // Settings
@@ -3616,10 +3586,7 @@
     wireEvents();
     if (password) tryAutoLogin();
     setInterval(() => {
-      if (!$('mainPage').classList.contains('hidden')) {
-        loadStats();
-        updateModelCooldowns();
-      }
+      if (!$('mainPage').classList.contains('hidden')) loadStats();
     }, 10000);
   }
 

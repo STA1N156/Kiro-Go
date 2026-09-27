@@ -28,7 +28,6 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 	}
 	snapshot := *cfg
 	snapshot.Accounts = append([]Account{}, cfg.Accounts...)
-	snapshot.ModelCooldowns = append([]ModelCooldown(nil), cfg.ModelCooldowns...)
 	snapshot.ApiKeys = append([]ApiKeyEntry(nil), cfg.ApiKeys...)
 	snapshot.PromptFilterRules = append([]PromptFilterRule(nil), cfg.PromptFilterRules...)
 	path, revision, usageRevision := cfgPath, configRevision, statsRevision
@@ -44,34 +43,6 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 	}
 	defer os.Remove(tmp)
 	return commitStatsSnapshot(tmp, path, revision, usageRevision)
-}
-
-// Model cooldowns share the existing batched save, never writing on the request path.
-func GetModelCooldowns() []ModelCooldown {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	if cfg == nil {
-		return nil
-	}
-	return append([]ModelCooldown(nil), cfg.ModelCooldowns...)
-}
-
-func SetModelCooldown(id, model string, until time.Time) {
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	if cfg == nil {
-		return
-	}
-	now := time.Now().Unix()
-	entries := make([]ModelCooldown, 0, len(cfg.ModelCooldowns)+1)
-	for _, entry := range cfg.ModelCooldowns {
-		if entry.Until > now && (entry.AccountID != id || entry.Model != model) {
-			entries = append(entries, entry)
-		}
-	}
-	entries = append(entries, ModelCooldown{AccountID: id, Model: model, Until: until.Unix()})
-	cfg.ModelCooldowns = entries
-	statsRevision++
 }
 
 func commitStatsSnapshot(tmp, path string, revision, usageRevision uint64) error {

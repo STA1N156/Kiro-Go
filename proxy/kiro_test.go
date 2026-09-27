@@ -244,11 +244,18 @@ func TestInitKiroHttpClientKeepsShortRestTimeout(t *testing.T) {
 	streamClient := kiroHttpStore.Load()
 	restClient := kiroRestHttpStore.Load()
 
-	if streamClient.Timeout != 5*time.Minute {
-		t.Fatalf("expected streaming timeout to be 5m, got %s", streamClient.Timeout)
+	if streamClient.Timeout != 15*time.Minute {
+		t.Fatalf("expected generation timeout to be 15m, got %s", streamClient.Timeout)
 	}
 	if restClient.Timeout != 30*time.Second {
 		t.Fatalf("expected REST timeout to stay 30s, got %s", restClient.Timeout)
+	}
+	const proxyURL = "http://model-timeout.invalid:8080"
+	t.Cleanup(func() { proxyClientCache.Delete(proxyURL) })
+	for i := 0; i < 2; i++ {
+		if client := GetClientForProxy(proxyURL); client.Timeout != 15*time.Minute {
+			t.Fatalf("expected per-account generation timeout to be 15m, got %s", client.Timeout)
+		}
 	}
 }
 
@@ -460,7 +467,7 @@ func TestParseEventStreamTrackedRejectsIncompleteToolOnCleanEOF(t *testing.T) {
 	}
 }
 
-func TestCallKiroAPIRetriesAPIKeyEndpointAfterTruncatedStream(t *testing.T) {
+func TestCallKiroAPIRetriesAPIKeyEndpointAfterEmptyStream(t *testing.T) {
 	var calls, completed int
 	var text string
 	var attempts, invocationIDs, hosts []string
@@ -470,7 +477,7 @@ func TestCallKiroAPIRetriesAPIKeyEndpointAfterTruncatedStream(t *testing.T) {
 		invocationIDs = append(invocationIDs, req.Header.Get("Amz-Sdk-Invocation-Id"))
 		hosts = append(hosts, req.URL.Host)
 		if calls == 1 {
-			return kiroStreamTestResponse(&truncatedReader{data: []byte{0, 0, 1}, err: io.ErrUnexpectedEOF}), nil
+			return kiroStreamTestResponse(bytes.NewReader(nil)), nil
 		}
 		return kiroStreamTestResponse(bytes.NewReader(awsEventStreamFrame(t,
 			"assistantResponseEvent", map[string]interface{}{"content": "recovered"}))), nil

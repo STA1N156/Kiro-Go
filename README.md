@@ -117,13 +117,13 @@ For Claude models, the model-name suffix (default `-thinking`) is the switch: `c
 
 Opus 5.5 is an exception because its upstream rejects disabled thinking: without the configured suffix it uses native `adaptive + low`; with the suffix it uses `adaptive + high`. Returned reasoning remains visible in both modes.
 
-If an account returns an empty generation stream (no text, reasoning, or complete tool call), that account is excluded from the affected model for three hours. Other models on that account remain available. Plain and thinking variants share the same model cooldown; account fallback and admin test calls cannot bypass it. The failed request can try another eligible account within the existing retry budget. Account cards show cooling models and their remaining time, and refresh after admin tests. Cooldowns expire automatically and are persisted by the existing batched save (normally within three seconds), so saved cooldowns survive restarts.
-
 ## Outbound Proxy
 
 For users in restricted network regions, configure an outbound proxy in the admin panel under **Settings - Outbound Proxy Settings**. Supports SOCKS5 and HTTP proxies.
 
 The setting takes effect immediately without restarting.
+
+Model generation requests have a 15-minute total timeout per upstream attempt, covering connection, thinking, and response output. This applies to streaming and non-streaming requests through both global and per-account proxies. Authentication and metadata requests keep their separate short timeouts; downstream clients and other relays may impose shorter limits.
 
 ## Environment Variables
 

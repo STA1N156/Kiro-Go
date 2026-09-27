@@ -1,31 +1,12 @@
 package proxy
 
 import (
-	"errors"
-	"fmt"
 	"kiro-go/config"
 	"kiro-go/logger"
 	"strings"
-	"time"
 )
 
 const maxAccountRetryAttempts = 3
-
-var errModelCooldown = errors.New("account model is cooling down")
-
-// All generation paths, including admin tests, share model-specific empty-stream handling.
-func (h *Handler) callKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
-	model := payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
-	if until := h.pool.ModelCooldownUntil(account.ID, model); time.Now().Before(until) {
-		return fmt.Errorf("%w: %s until %s", errModelCooldown, model, until.UTC().Format(time.RFC3339))
-	}
-	err := CallKiroAPI(account, payload, callback)
-	if errors.Is(err, errEmptyKiroStream) {
-		until := h.pool.CooldownModel(account.ID, model, 3*time.Hour)
-		logger.Warnf("[AccountFailover] Account %s model %s returned no output; cooling down until %s", account.ID, model, until.UTC().Format(time.RFC3339))
-	}
-	return err
-}
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
@@ -107,9 +88,6 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 
 	errMsg := err.Error()
 	switch {
-	case errors.Is(err, errEmptyKiroStream), errors.Is(err, errModelCooldown):
-		// Already handled per model; do not cool down or disable the whole account.
-		return
 	case isOverageErrorMessage(errMsg):
 		h.disableAccountOverage(account)
 		h.pool.RecordError(account.ID, false)
