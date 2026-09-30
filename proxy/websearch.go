@@ -11,6 +11,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -245,7 +246,7 @@ func randomFromCharset(n int, charset string) string {
 }
 
 // callMcpAPI posts the JSON-RPC request to Kiro MCP and returns the parsed response.
-func callMcpAPI(account *config.Account, mcpReq *McpRequest) (*McpResponse, error) {
+func callMcpAPI(ctx context.Context, account *config.Account, mcpReq *McpRequest) (*McpResponse, error) {
 	if mcpReq == nil {
 		return nil, fmt.Errorf("nil MCP request")
 	}
@@ -256,7 +257,7 @@ func callMcpAPI(account *config.Account, mcpReq *McpRequest) (*McpResponse, erro
 		profileArn = strings.TrimSpace(account.ProfileArn)
 	}
 	if profileArn == "" && account != nil && !config.IsAPIKeyAccount(account) {
-		if arn, err := ResolveProfileArn(account); err == nil {
+		if arn, err := ResolveProfileArnContext(ctx, account); err == nil {
 			profileArn = strings.TrimSpace(arn)
 		} else if !isProfileArnResolutionSoftError(err) {
 			logger.Debugf("[MCP] ProfileArn resolve for %s: %v", accountEmailForLog(account), err)
@@ -272,7 +273,7 @@ func callMcpAPI(account *config.Account, mcpReq *McpRequest) (*McpResponse, erro
 	}
 	logger.Debugf("[MCP] Request: %s", string(reqBody))
 
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, err
 	}
@@ -361,15 +362,21 @@ func parseSearchResults(mcpResp *McpResponse) *WebSearchResults {
 // A 200 JSON-RPC envelope whose search payload cannot be parsed is also treated
 // as failure (retry next account) — only a well-formed results object (including
 // an empty results array) counts as success.
-func (h *Handler) performWebSearch(model, query string) (*WebSearchResults, string, *config.Account, error) {
+func (h *Handler) performWebSearch(ctx context.Context, model, query string) (*WebSearchResults, string, *config.Account, error) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, "", nil, err
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
-		if err := h.ensureValidToken(account); err != nil {
+		if err := h.ensureValidTokenContext(ctx, account); err != nil {
+			if ctx.Err() != nil {
+				return nil, "", nil, ctx.Err()
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -377,7 +384,10 @@ func (h *Handler) performWebSearch(model, query string) (*WebSearchResults, stri
 		}
 
 		toolUseID, mcpReq := createMcpRequest(query)
-		mcpResp, err := callMcpAPI(account, mcpReq)
+		mcpResp, err := callMcpAPI(ctx, account, mcpReq)
+		if ctx.Err() != nil {
+			return nil, "", nil, ctx.Err()
+		}
 		if err != nil {
 			logger.Warnf("[WebSearch] MCP call failed on account %s: %v", account.Email, err)
 			lastErr = err
@@ -513,7 +523,7 @@ func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeReque
 	logger.Infof("[WebSearch] Processing query: %s (stream=%v)", query, req.Stream)
 	reqStart := time.Now()
 
-	results, toolUseID, account, err := h.performWebSearch(req.Model, query)
+	results, toolUseID, account, err := h.performWebSearch(requestContext(w), req.Model, query)
 	if err != nil {
 		logger.Warnf("[WebSearch] All MCP attempts failed: %v", err)
 		accountID := ""

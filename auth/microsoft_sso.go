@@ -6,6 +6,7 @@ package auth
 // URL into the existing admin flow (the same interaction used by IAM SSO).
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -631,6 +632,10 @@ func exchangeMicrosoftAuthorizationCode(client *http.Client, leg *microsoftProvi
 }
 
 func refreshExternalIdpToken(refreshToken, clientID, tokenEndpoint, issuerURL, scopes string, client *http.Client) (string, string, int64, string, error) {
+	return refreshExternalIdpTokenContext(context.Background(), refreshToken, clientID, tokenEndpoint, issuerURL, scopes, client)
+}
+
+func refreshExternalIdpTokenContext(ctx context.Context, refreshToken, clientID, tokenEndpoint, issuerURL, scopes string, client *http.Client) (string, string, int64, string, error) {
 	if strings.TrimSpace(refreshToken) == "" || strings.TrimSpace(clientID) == "" || strings.TrimSpace(tokenEndpoint) == "" {
 		return "", "", 0, "", fmt.Errorf("external IdP refresh requires refreshToken, clientId, and tokenEndpoint")
 	}
@@ -646,7 +651,7 @@ func refreshExternalIdpToken(refreshToken, clientID, tokenEndpoint, issuerURL, s
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("scope", normalizedScopes)
-	token, err := postExternalIdpToken(client, tokenEndpoint, issuerURL, form)
+	token, err := postExternalIdpTokenContext(ctx, client, tokenEndpoint, issuerURL, form)
 	if err != nil {
 		return "", "", 0, "", err
 	}
@@ -657,6 +662,10 @@ func refreshExternalIdpToken(refreshToken, clientID, tokenEndpoint, issuerURL, s
 }
 
 func postExternalIdpToken(client *http.Client, tokenEndpoint, issuerURL string, form url.Values) (*externalIdpTokenResponse, error) {
+	return postExternalIdpTokenContext(context.Background(), client, tokenEndpoint, issuerURL, form)
+}
+
+func postExternalIdpTokenContext(ctx context.Context, client *http.Client, tokenEndpoint, issuerURL string, form url.Values) (*externalIdpTokenResponse, error) {
 	if err := ValidateExternalIdpEndpoint(tokenEndpoint); err != nil {
 		return nil, fmt.Errorf("external IdP token endpoint rejected: %w", err)
 	}
@@ -669,7 +678,7 @@ func postExternalIdpToken(client *http.Client, tokenEndpoint, issuerURL string, 
 			return nil, fmt.Errorf("external IdP token endpoint rejected: %w", err)
 		}
 	}
-	request, err := http.NewRequest(http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("build external IdP token request: %w", err)
 	}

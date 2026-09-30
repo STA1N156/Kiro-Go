@@ -1902,6 +1902,22 @@ img.brand-icon {
 }
 
 /* Usage bars */
+.quota-summary {
+  margin-bottom: 1.125rem;
+  gap: 0.5rem;
+}
+.quota-summary-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.quota-summary-values {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 .account-usage {
   margin: 0.5rem 0 0.75rem;
 }

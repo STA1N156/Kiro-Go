@@ -255,6 +255,13 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 // when it is missing. First tries ListAvailableProfiles; if that returns empty,
 // falls back to refreshing the token (which returns profileArn in the response).
 func ResolveProfileArn(account *config.Account) (string, error) {
+	return ResolveProfileArnContext(context.Background(), account)
+}
+
+func ResolveProfileArnContext(ctx context.Context, account *config.Account) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if account == nil {
 		return "", fmt.Errorf("account is nil")
 	}
@@ -273,7 +280,10 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 	if !profileLookupSuppressed {
 		// external_idp accounts have no authoritative AWS home region, so their
 		// candidate data planes are probed without changing Account.Region.
-		profileArn, err := resolveProfileArnAcrossRegions(account)
+		profileArn, err := resolveProfileArnAcrossRegionsContext(ctx, account)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		if err == nil && profileArn != "" {
 			if updateErr := config.UpdateAccountProfileArn(account.ID, profileArn); updateErr != nil {
 				logger.Warnf("[ProfileArn] Failed to cache profile ARN for %s: %v", account.Email, updateErr)
@@ -291,7 +301,7 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 	// consumes profileArn.
 	if account.RefreshToken != "" &&
 		!strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp") {
-		_, _, _, refreshedArn, refreshErr := auth.RefreshToken(account)
+		_, _, _, refreshedArn, refreshErr := auth.RefreshTokenContext(ctx, account)
 		if refreshErr == nil && refreshedArn != "" {
 			if updateErr := config.UpdateAccountProfileArn(account.ID, refreshedArn); updateErr != nil {
 				logger.Warnf("[ProfileArn] Failed to cache profile ARN for %s: %v", account.Email, updateErr)
@@ -394,10 +404,13 @@ func ensureRestProfileArn(account *config.Account) error {
 	return nil
 }
 
-func resolveProfileArnAcrossRegions(account *config.Account) (string, error) {
+func resolveProfileArnAcrossRegionsContext(ctx context.Context, account *config.Account) (string, error) {
 	var probeErrors []error
 	for _, region := range kiroProfileRegionCandidates(account) {
-		profiles, err := listKiroProfilesWithRetryInRegion(account, region)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		profiles, err := listKiroProfilesWithRetryInRegionContext(ctx, account, region)
 		if err != nil {
 			if isBuilderIDProfileUnsupportedError(account, err) {
 				return "", err
@@ -413,10 +426,6 @@ func resolveProfileArnAcrossRegions(account *config.Account) (string, error) {
 		return "", errors.Join(probeErrors...)
 	}
 	return "", fmt.Errorf("empty profile list")
-}
-
-func listKiroProfilesWithRetryInRegion(account *config.Account, region string) ([]KiroProfile, error) {
-	return listKiroProfilesWithRetryInRegionContext(context.Background(), account, region)
 }
 
 func listKiroProfilesWithRetryInRegionContext(

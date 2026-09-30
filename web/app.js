@@ -16,6 +16,7 @@
   if (!supportedLangs.includes(currentLang)) currentLang = 'zh';
   const dict = { en: null, zh: null, vi: null };
   let accountsData = [];
+  let quotaSummary = null;
   const selectedAccounts = new Set();
   let filterKeyword = '';
   let filterStatus = 'all';
@@ -138,6 +139,7 @@
     await loadLocale(lang);
     applyTranslations();
     renderVersionBadge();
+    renderQuotaSummary();
     renderAccounts();
     renderPromptRules();
     renderLogs(logsCache);
@@ -689,6 +691,25 @@
     $('statFailed').textContent = d.failedRequests || 0;
     $('statTokens').textContent = formatNum(d.totalTokens || 0);
     $('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
+    quotaSummary = d;
+    renderQuotaSummary();
+  }
+
+  function renderQuotaSummary() {
+    if (!quotaSummary) return;
+    const total = quotaSummary.quotaTotal || 0;
+    const remaining = Math.max(0, Math.min(total, quotaSummary.quotaRemaining || 0));
+    const percent = total > 0 ? remaining / total * 100 : 0;
+    const format = new Intl.NumberFormat(currentLang, { maximumFractionDigits: 1 });
+    $('quotaSummaryValues').textContent = total > 0
+      ? t('stats.quotaValues', format.format(remaining), format.format(total))
+      : t('stats.quotaUnknown');
+    $('quotaSummaryPercent').textContent = total > 0 ? percent.toFixed(1) + '%' : '—';
+    $('quotaSummaryBar').setAttribute('aria-valuenow', percent.toFixed(1));
+    const fill = $('quotaSummaryFill');
+    fill.style.width = percent + '%';
+    fill.classList.toggle('critical', total > 0 && percent < 10);
+    fill.classList.toggle('high', total > 0 && percent >= 10 && percent < 30);
   }
 
   // ===== Logs =====

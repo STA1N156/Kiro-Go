@@ -186,6 +186,17 @@
         </div>
       </div>
 
+      <div class="stat-card quota-summary">
+        <div class="quota-summary-heading">
+          <span class="stat-card-title" data-i18n="stats.quotaTitle"></span>
+          <span id="quotaSummaryValues" class="quota-summary-values">—</span>
+        </div>
+        <div id="quotaSummaryBar" class="usage-bar" role="progressbar" aria-labelledby="quotaSummaryValues" aria-valuemin="0" aria-valuemax="100">
+          <div id="quotaSummaryFill" class="usage-fill"></div>
+        </div>
+        <div class="usage-text"><span data-i18n="stats.quotaNote"></span><span id="quotaSummaryPercent">—</span></div>
+      </div>
+
       <!-- Accounts tab -->
       <div id="tabAccounts" class="tab-content">
         <div class="card">

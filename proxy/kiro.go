@@ -42,7 +42,7 @@ const (
 var (
 	errEmptyKiroStream         = errors.New("upstream stream ended before any output")
 	errIncompleteKiroToolInput = errors.New("upstream stream ended with incomplete tool input")
-	streamRetryWait            = time.Sleep
+	streamRetryWait            = waitForStreamRetry
 	resolveKiroEndpoints       = endpointsForAccount
 )
 
@@ -352,6 +352,24 @@ func getSortedEndpoints(preferred string) []kiroEndpoint {
 
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	return CallKiroAPIContext(context.Background(), account, payload, callback)
+}
+
+func waitForStreamRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	originalProfileArn := ""
 	if payload != nil {
 		originalProfileArn = payload.ProfileArn
@@ -385,7 +403,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	}
 
 	if payload != nil && strings.TrimSpace(payload.ProfileArn) == "" && !config.IsAPIKeyAccount(account) {
-		if profileArn, err := ResolveProfileArn(account); err == nil {
+		if profileArn, err := ResolveProfileArnContext(ctx, account); err == nil {
 			payload.ProfileArn = profileArn
 		} else if isProfileArnResolutionSoftError(err) {
 			logger.Debugf("[ProfileArn] Skipped profile ARN resolution for %s: %v", accountEmailForLog(account), err)
@@ -401,6 +419,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	var lastErr error
 endpointLoop:
 	for epIndex, ep := range endpoints {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
@@ -421,7 +442,7 @@ endpointLoop:
 
 		for streamAttempt := 1; streamAttempt <= maxStreamAttemptsPerEndpoint; streamAttempt++ {
 			// Requests and bodies cannot be reused after an HTTP attempt.
-			req, err := http.NewRequest("POST", epURL, bytes.NewReader(reqBody))
+			req, err := http.NewRequestWithContext(ctx, "POST", epURL, bytes.NewReader(reqBody))
 			if err != nil {
 				lastErr = err
 				continue endpointLoop
@@ -451,6 +472,9 @@ endpointLoop:
 
 			resp, err := GetClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				lastErr = err
 				logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
 				if !isRetryableStreamError(err) {
@@ -469,6 +493,9 @@ endpointLoop:
 			if resp.StatusCode != 200 {
 				errBody, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, ep.Name, string(errBody))
 				// Authentication errors and payment errors are not retried across endpoints.
 				if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
@@ -480,6 +507,9 @@ endpointLoop:
 
 			emitted, err := parseEventStreamTracked(resp.Body, callback)
 			resp.Body.Close()
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if err == nil {
 				return nil
 			}
@@ -507,7 +537,9 @@ endpointLoop:
 
 			logger.Warnf("[KiroAPI] Endpoint %s stream failed before any output (attempt %d/%d): %v",
 				ep.Name, streamAttempt, maxStreamAttemptsPerEndpoint, err)
-			streamRetryWait(streamRetryBackoff)
+			if err := streamRetryWait(ctx, streamRetryBackoff); err != nil {
+				return err
+			}
 			if !hasSameEndpointRetry {
 				continue endpointLoop
 			}

@@ -10,6 +10,7 @@ import (
 	"kiro-go/config"
 	"kiro-go/logger"
 	"kiro-go/pool"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -82,7 +83,8 @@ type Handler struct {
 	modelsCacheMu      sync.RWMutex
 	modelsCacheTime    int64
 	promptCache        *promptCacheTracker
-	tokenRefreshMu     sync.Mutex
+	tokenRefreshOnce   sync.Once
+	tokenRefreshGate   chan struct{}
 	credentialImportMu sync.Mutex
 	// 请求日志 (环形缓冲区，包含成功和失败)
 	requestLogs   []RequestLog
@@ -842,6 +844,8 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 
 // handleClaudeMessages Claude API 处理
 func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
+	w, finish := h.trackRequest(w, r)
+	defer finish()
 	h.handleClaudeMessagesInternal(w, r)
 }
 
@@ -946,11 +950,17 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
+		if requestContext(w).Err() != nil {
+			return
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
-		if err := h.ensureValidToken(account); err != nil {
+		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			if requestContext(w).Err() != nil {
+				return
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -1249,7 +1259,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		if requestContext(w).Err() != nil {
+			return
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1319,6 +1332,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 }
 
 func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
+	if event == "error" || event == "response.failed" {
+		markResponseFailed(w)
+	}
 	jsonData, _ := json.Marshal(data)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(jsonData))
 	flusher.Flush()
@@ -1380,17 +1396,15 @@ func (h *Handler) addCredits(credits float64) {
 	h.creditsMu.Unlock()
 }
 
-// 统计记录 (使用原子操作)
+// Record upstream usage independently of the final client-facing outcome.
 func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) {
-	atomic.AddInt64(&h.totalRequests, 1)
-	atomic.AddInt64(&h.successRequests, 1)
 	atomic.AddInt64(&h.totalTokens, int64(inputTokens+outputTokens))
 	h.addCredits(credits)
 }
 
 // recordSuccessForApiKey is recordSuccess + per-API-key usage attribution.
 // When apiKeyID is empty (legacy single-key path or unauthenticated path), only the
-// global counters are updated. Disk persistence is handled by backgroundStatsSaver.
+// global usage is updated. Disk persistence is handled by backgroundStatsSaver.
 func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTokens int, credits float64) {
 	h.recordSuccess(inputTokens, outputTokens, credits)
 	if apiKeyID == "" {
@@ -1401,11 +1415,8 @@ func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTok
 	}
 }
 
-// recordFailureWithDetails records a failure and stores it in the request logs.
+// recordFailureWithDetails stores failure details; trackRequest counts the final outcome.
 func (h *Handler) recordFailureWithDetails(endpoint, model, accountID string, err error) {
-	atomic.AddInt64(&h.totalRequests, 1)
-	atomic.AddInt64(&h.failedRequests, 1)
-
 	if err == nil {
 		return
 	}
@@ -1493,11 +1504,17 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	reqStart := time.Now()
 
 	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
+		if requestContext(w).Err() != nil {
+			return
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
-		if err := h.ensureValidToken(account); err != nil {
+		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			if requestContext(w).Err() != nil {
+				return
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -1533,7 +1550,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		if requestContext(w).Err() != nil {
+			return
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1605,6 +1625,8 @@ func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, me
 
 // handleOpenAIChat OpenAI API 处理
 func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
+	w, finish := h.trackRequest(w, r)
+	defer finish()
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", 405)
 		return
@@ -1664,11 +1686,17 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	reqStart := time.Now()
 
 	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
+		if requestContext(w).Err() != nil {
+			return
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
-		if err := h.ensureValidToken(account); err != nil {
+		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			if requestContext(w).Err() != nil {
+				return
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -1947,7 +1975,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		if requestContext(w).Err() != nil {
+			return
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1956,6 +1987,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				continue
 			}
 			h.recordFailureWithDetails("openai", model, account.ID, err)
+			markResponseFailed(w)
+			data, _ := json.Marshal(map[string]interface{}{"error": map[string]string{"type": "server_error", "message": err.Error()}})
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
 			return
 		}
 
@@ -2025,11 +2060,17 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	reqStart := time.Now()
 
 	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
+		if requestContext(w).Err() != nil {
+			return
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
-		if err := h.ensureValidToken(account); err != nil {
+		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			if requestContext(w).Err() != nil {
+				return
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -2058,7 +2099,10 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		if requestContext(w).Err() != nil {
+			return
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2118,12 +2162,24 @@ func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, me
 // across accounts because refreshes are rare and this keeps every refresh entry
 // point consistent.
 func (h *Handler) refreshAccountToken(account *config.Account, force bool) (bool, error) {
+	return h.refreshAccountTokenContext(context.Background(), account, force)
+}
+
+func (h *Handler) refreshAccountTokenContext(ctx context.Context, account *config.Account, force bool) (bool, error) {
 	if account == nil || strings.TrimSpace(account.ID) == "" {
 		return false, fmt.Errorf("account is required for token refresh")
 	}
 
-	h.tokenRefreshMu.Lock()
-	defer h.tokenRefreshMu.Unlock()
+	h.tokenRefreshOnce.Do(func() { h.tokenRefreshGate = make(chan struct{}, 1) })
+	select {
+	case h.tokenRefreshGate <- struct{}{}:
+		defer func() { <-h.tokenRefreshGate }()
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 
 	var latest *config.Account
 	accounts := config.GetAccounts()
@@ -2173,7 +2229,7 @@ func (h *Handler) refreshAccountToken(account *config.Account, force bool) (bool
 		return false, fmt.Errorf("account %s has no refresh token", working.ID)
 	}
 
-	accessToken, refreshToken, expiresAt, profileArn, err := auth.RefreshToken(&working)
+	accessToken, refreshToken, expiresAt, profileArn, err := auth.RefreshTokenContext(ctx, &working)
 	if err != nil {
 		return false, err
 	}
@@ -2206,6 +2262,13 @@ func (h *Handler) refreshAccountToken(account *config.Account, force bool) (bool
 
 // ensureValidToken 确保 token 有效
 func (h *Handler) ensureValidToken(account *config.Account) error {
+	return h.ensureValidTokenContext(context.Background(), account)
+}
+
+func (h *Handler) ensureValidTokenContext(ctx context.Context, account *config.Account) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if config.IsAPIKeyAccount(account) {
 		if accountBearerToken(account) == "" {
 			return fmt.Errorf("account %s has no kiroApiKey", account.ID)
@@ -2216,7 +2279,7 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 		return nil
 	}
 
-	_, err := h.refreshAccountToken(account, false)
+	_, err := h.refreshAccountTokenContext(ctx, account, false)
 	return err
 }
 
@@ -3811,7 +3874,23 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
+	var quotaTotal, quotaRemaining float64
+	addQuota := func(limit, used float64) {
+		if limit > 0 {
+			quotaTotal += limit
+			quotaRemaining += math.Max(0, limit-math.Max(0, used))
+		}
+	}
+	now := time.Now().Unix()
+	for _, account := range config.GetAccounts() {
+		addQuota(account.UsageLimit, account.UsageCurrent)
+		if account.TrialStatus == "ACTIVE" && (account.TrialExpiresAt == 0 || account.TrialExpiresAt > now) {
+			addQuota(account.TrialUsageLimit, account.TrialUsageCurrent)
+		}
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"quotaTotal":      quotaTotal,
+		"quotaRemaining":  quotaRemaining,
 		"version":         config.Version,
 		"accounts":        h.pool.Count(),
 		"available":       h.pool.AvailableCount(),
@@ -4011,7 +4090,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	if err := h.ensureValidToken(account); err != nil {
+	if err := h.ensureValidTokenContext(r.Context(), account); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
 		return
@@ -4048,7 +4127,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		OnContextUsage: func(pct float64) {},
 	}
 
-	err := h.callKiroAPI(account, kiroPayload, callback)
+	err := h.callKiroAPIContext(r.Context(), account, kiroPayload, callback)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})

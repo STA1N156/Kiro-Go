@@ -10,6 +10,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"kiro-go/config"
@@ -51,7 +52,7 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 	// Allow one extra iteration so a terminal flush can run after the last
 	// search-only round (same pattern as 0..=MAX_WEB_SEARCH_ROUNDS in kiro-rs).
 	for roundIdx := 0; roundIdx <= maxUses; roundIdx++ {
-		round, account, err := h.callUpstreamForWebSearch(&working, thinking, fallbackInput)
+		round, account, err := h.callUpstreamForWebSearch(requestContext(w), &working, thinking, fallbackInput)
 		if err != nil {
 			logger.Warnf("[WebSearchLoop] upstream round %d failed: %v", roundIdx, err)
 			accountID := ""
@@ -80,7 +81,7 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 		// this round's searches fit under max_uses.
 		roundSearchN := countWebSearchToolUses(round.toolUses)
 		if shouldSearchRound(roundIdx, round.toolUses, maxUses) && searchCount+roundSearchN <= maxUses {
-			searched, searchErr := h.searchAllWebUses(req.Model, round.toolUses)
+			searched, searchErr := h.searchAllWebUses(requestContext(w), req.Model, round.toolUses)
 			if searchErr != nil {
 				logger.Warnf("[WebSearchLoop] MCP search failed: %v", searchErr)
 				h.recordFailureWithDetails("claude", req.Model, lastAccountID, searchErr)
@@ -104,7 +105,7 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 				logger.Warnf("[WebSearchLoop] max_uses=%d reached; skipping further web_search", maxUses)
 				break
 			}
-			results, _, _, sErr := h.performWebSearch(req.Model, toolUseQuery(tu.Input))
+			results, _, _, sErr := h.performWebSearch(requestContext(w), req.Model, toolUseQuery(tu.Input))
 			if sErr != nil {
 				logger.Warnf("[WebSearchLoop] final-round MCP search failed: %v", sErr)
 				h.recordFailureWithDetails("claude", req.Model, lastAccountID, sErr)
@@ -143,17 +144,23 @@ func (h *Handler) runWebSearchLoop(w http.ResponseWriter, req *ClaudeRequest, th
 }
 
 // callUpstreamForWebSearch converts the Claude request and buffers one Kiro stream.
-func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, estimatedInputTokens int) (*webSearchRoundOutcome, *config.Account, error) {
+func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeRequest, thinking bool, estimatedInputTokens int) (*webSearchRoundOutcome, *config.Account, error) {
 	payload := ClaudeToKiro(req, thinking)
 	excluded := make(map[string]bool)
 	var lastErr error
 
 	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		account := h.pool.GetNextForModelExcluding(req.Model, excluded)
 		if account == nil {
 			break
 		}
-		if err := h.ensureValidToken(account); err != nil {
+		if err := h.ensureValidTokenContext(ctx, account); err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -197,7 +204,10 @@ func (h *Handler) callUpstreamForWebSearch(req *ClaudeRequest, thinking bool, es
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := h.callKiroAPIContext(ctx, account, payload, callback)
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -254,10 +264,10 @@ func countWebSearchToolUses(toolUses []KiroToolUse) int {
 }
 
 // searchAllWebUses runs MCP for each tool_use in order (all are web_search).
-func (h *Handler) searchAllWebUses(model string, toolUses []KiroToolUse) ([]*WebSearchResults, error) {
+func (h *Handler) searchAllWebUses(ctx context.Context, model string, toolUses []KiroToolUse) ([]*WebSearchResults, error) {
 	out := make([]*WebSearchResults, 0, len(toolUses))
 	for _, tu := range toolUses {
-		results, _, _, err := h.performWebSearch(model, toolUseQuery(tu.Input))
+		results, _, _, err := h.performWebSearch(ctx, model, toolUseQuery(tu.Input))
 		if err != nil {
 			return nil, err
 		}

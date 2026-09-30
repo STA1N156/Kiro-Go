@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"kiro-go/config"
@@ -12,12 +13,18 @@ import (
 var errModelCooldown = errors.New("account model is cooling down")
 
 // All generation paths, including admin tests, share model-specific empty-stream handling.
-func (h *Handler) callKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+func (h *Handler) callKiroAPIContext(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	model := payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
 	if until := h.pool.ModelCooldownUntil(account.ID, model); time.Now().Before(until) {
 		return fmt.Errorf("%w: %s until %s", errModelCooldown, model, until.UTC().Format(time.RFC3339))
 	}
-	err := CallKiroAPI(account, payload, callback)
+	err := CallKiroAPIContext(ctx, account, payload, callback)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if errors.Is(err, errEmptyKiroStream) {
 		until := h.pool.CooldownModel(account.ID, model, time.Duration(config.GetModelCooldownSeconds())*time.Second)
 		logger.Warnf("[AccountFailover] Account %s model %s returned no output; cooling down until %s", account.ID, model, until.UTC().Format(time.RFC3339))
@@ -99,7 +106,7 @@ func (h *Handler) disableAccountOverage(account *config.Account) {
 }
 
 func (h *Handler) handleAccountFailure(account *config.Account, err error) {
-	if account == nil || err == nil {
+	if account == nil || err == nil || errors.Is(err, context.Canceled) {
 		return
 	}
 

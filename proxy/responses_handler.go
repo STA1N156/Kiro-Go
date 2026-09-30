@@ -13,6 +13,8 @@ import (
 const defaultResponsesModel = "claude-sonnet-4.5"
 
 func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
+	w, finish := h.trackRequest(w, r)
+	defer finish()
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", 405)
 		return
@@ -135,11 +137,17 @@ func (h *Handler) handleResponsesNonStream(
 	reqStart := time.Now()
 
 	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
+		if requestContext(w).Err() != nil {
+			return
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
-		if err := h.ensureValidToken(account); err != nil {
+		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			if requestContext(w).Err() != nil {
+				return
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -168,7 +176,10 @@ func (h *Handler) handleResponsesNonStream(
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		if requestContext(w).Err() != nil {
+			return
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -302,12 +313,7 @@ func (h *Handler) handleResponsesStream(
 			event["sequence_number"] = sequenceNumber
 			sequenceNumber++
 		}
-		data, err := json.Marshal(payload)
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, string(data))
-		flusher.Flush()
+		h.sendSSE(w, flusher, eventName, payload)
 	}
 
 	createdAt := time.Now().Unix()
@@ -333,11 +339,17 @@ func (h *Handler) handleResponsesStream(
 	reqStart := time.Now()
 
 	for attempt, limit := 0, config.GetMaxAccountRetryAttempts(); attempt < limit; attempt++ {
+		if requestContext(w).Err() != nil {
+			return
+		}
 		account := h.pool.GetNextForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
-		if err := h.ensureValidToken(account); err != nil {
+		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			if requestContext(w).Err() != nil {
+				return
+			}
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err)
@@ -519,7 +531,10 @@ func (h *Handler) handleResponsesStream(
 			},
 		}
 
-		err := h.callKiroAPI(account, payload, callback)
+		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		if requestContext(w).Err() != nil {
+			return
+		}
 		if err != nil {
 			if !responseStarted {
 				lastErr = err

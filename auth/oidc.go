@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,10 @@ var socialTokenURL = func() string {
 // RefreshToken 刷新 access token
 // Returns: accessToken, refreshToken, expiresAt, profileArn, error
 func RefreshToken(account *config.Account) (string, string, int64, string, error) {
+	return RefreshTokenContext(context.Background(), account)
+}
+
+func RefreshTokenContext(ctx context.Context, account *config.Account) (string, string, int64, string, error) {
 	if config.IsAPIKeyAccount(account) {
 		return "", "", 0, "", fmt.Errorf("API Key credentials do not support token refresh")
 	}
@@ -35,7 +40,7 @@ func RefreshToken(account *config.Account) (string, string, int64, string, error
 	client := GetAuthClientForProxy(proxyURL)
 
 	if strings.EqualFold(strings.TrimSpace(account.AuthMethod), MicrosoftSSOAuthMethod) {
-		return refreshExternalIdpToken(
+		return refreshExternalIdpTokenContext(ctx,
 			account.RefreshToken,
 			account.ClientID,
 			account.TokenEndpoint,
@@ -45,13 +50,13 @@ func RefreshToken(account *config.Account) (string, string, int64, string, error
 		)
 	}
 	if account.AuthMethod == "social" {
-		return refreshSocialToken(account.RefreshToken, client)
+		return refreshSocialToken(ctx, account.RefreshToken, client)
 	}
-	return refreshOIDCToken(account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
+	return refreshOIDCToken(ctx, account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
 }
 
 // refreshOIDCToken IdC/Builder ID token 刷新
-func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, client *http.Client) (string, string, int64, string, error) {
+func refreshOIDCToken(ctx context.Context, refreshToken, clientID, clientSecret, region string, client *http.Client) (string, string, int64, string, error) {
 	if clientID == "" || clientSecret == "" {
 		return "", "", 0, "", fmt.Errorf("OIDC refresh requires clientId and clientSecret")
 	}
@@ -69,7 +74,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, clien
 	}
 
 	body, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
@@ -99,7 +104,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, clien
 }
 
 // refreshSocialToken Social (GitHub/Google) token 刷新
-func refreshSocialToken(refreshToken string, client *http.Client) (string, string, int64, string, error) {
+func refreshSocialToken(ctx context.Context, refreshToken string, client *http.Client) (string, string, int64, string, error) {
 	url := socialTokenURL()
 
 	payload := map[string]string{
@@ -107,7 +112,7 @@ func refreshSocialToken(refreshToken string, client *http.Client) (string, strin
 	}
 
 	body, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
