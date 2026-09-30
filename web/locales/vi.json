@@ -13,8 +13,6 @@
   "footer.resources": "Tài nguyên",
   "stats.accounts": "Tài khoản",
   "stats.quotaTitle": "Hạn mức còn lại của tất cả tài khoản",
-  "stats.quotaValues": "Còn lại {0} / Tổng {1} Credits",
-  "stats.quotaNote": "Theo dữ liệu đồng bộ gần nhất, gồm hạn mức dùng thử còn hiệu lực",
   "stats.quotaUnknown": "Chưa có dữ liệu hạn mức",
   "stats.requests": "Yêu cầu",
   "stats.success": "Thành công",

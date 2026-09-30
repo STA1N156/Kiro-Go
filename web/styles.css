@@ -1918,6 +1918,9 @@ img.brand-icon {
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
+.quota-summary .usage-text {
+  justify-content: flex-end;
+}
 .account-usage {
   margin: 0.5rem 0 0.75rem;
 }
