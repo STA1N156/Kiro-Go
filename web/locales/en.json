@@ -13,6 +13,7 @@
   "footer.resources": "Resources",
   "stats.accounts": "Accounts",
   "stats.quotaTitle": "Remaining quota across all accounts",
+  "stats.quotaUsed": "Used {0}%",
   "stats.quotaUnknown": "No quota data yet",
   "stats.requests": "Requests",
   "stats.success": "Success",

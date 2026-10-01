@@ -699,17 +699,17 @@
     if (!quotaSummary) return;
     const total = quotaSummary.quotaTotal || 0;
     const remaining = Math.max(0, Math.min(total, quotaSummary.quotaRemaining || 0));
-    const percent = total > 0 ? remaining / total * 100 : 0;
+    const percent = total > 0 ? (total - remaining) / total * 100 : 0;
     const format = new Intl.NumberFormat(currentLang, { maximumFractionDigits: 1 });
     $('quotaSummaryValues').textContent = total > 0
       ? `${format.format(remaining)} / ${format.format(total)}`
       : t('stats.quotaUnknown');
-    $('quotaSummaryPercent').textContent = total > 0 ? percent.toFixed(1) + '%' : '—';
+    $('quotaSummaryPercent').textContent = total > 0 ? t('stats.quotaUsed', percent.toFixed(1)) : '—';
     $('quotaSummaryBar').setAttribute('aria-valuenow', percent.toFixed(1));
     const fill = $('quotaSummaryFill');
     fill.style.width = percent + '%';
-    fill.classList.toggle('critical', total > 0 && percent < 10);
-    fill.classList.toggle('high', total > 0 && percent >= 10 && percent < 30);
+    fill.classList.toggle('critical', percent > 90);
+    fill.classList.toggle('high', percent > 70 && percent <= 90);
   }
 
   // ===== Logs =====

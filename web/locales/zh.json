@@ -13,6 +13,7 @@
   "footer.resources": "资源",
   "stats.accounts": "账号",
   "stats.quotaTitle": "全部账号剩余额度",
+  "stats.quotaUsed": "已用 {0}%",
   "stats.quotaUnknown": "暂无额度数据",
   "stats.requests": "请求",
   "stats.success": "成功",

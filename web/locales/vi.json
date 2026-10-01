@@ -13,6 +13,7 @@
   "footer.resources": "Tài nguyên",
   "stats.accounts": "Tài khoản",
   "stats.quotaTitle": "Hạn mức còn lại của tất cả tài khoản",
+  "stats.quotaUsed": "Đã dùng {0}%",
   "stats.quotaUnknown": "Chưa có dữ liệu hạn mức",
   "stats.requests": "Yêu cầu",
   "stats.success": "Thành công",
