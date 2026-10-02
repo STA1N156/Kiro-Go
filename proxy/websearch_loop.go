@@ -208,6 +208,10 @@ func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeReque
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
+		if err == errContextTooLong {
+			lastErr = err
+			break
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true

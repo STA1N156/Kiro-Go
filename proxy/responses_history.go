@@ -1,25 +1,25 @@
 package proxy
 
-// maxResponsesHistoryDepth caps how far back we walk the previous_response_id
-// chain when expanding history. The cap prevents pathological loops in
-// corrupted/cyclic stores from running forever; legitimate chains rarely go
-// this deep within the 30-day TTL.
-const maxResponsesHistoryDepth = 64
+import (
+	"context"
+	"errors"
+)
 
 // expandPreviousResponseHistory rebuilds the conversation history that led up
 // to prev. It walks the previous_response_id chain backwards (oldest → newest)
 // and emits OpenAI messages for both stored inputs and stored outputs of every
 // ancestor, so a multi-turn /v1/responses session preserves full context.
 //
-// If a link in the chain is missing on disk (e.g. expired past TTL or the
-// referenced ID was deleted), expansion stops at the deepest reachable
-// ancestor instead of failing — the most recent context is still useful.
-func expandPreviousResponseHistory(prev *ResponsesObject) []OpenAIMessage {
+// Missing history must fail explicitly rather than silently send partial context.
+func expandPreviousResponseHistory(ctx context.Context, prev *ResponsesObject) ([]OpenAIMessage, error) {
 	if prev == nil {
-		return nil
+		return nil, nil
 	}
 
-	chain := collectAncestorChain(prev)
+	chain, err := collectAncestorChain(ctx, prev)
+	if err != nil {
+		return nil, err
+	}
 
 	messages := make([]OpenAIMessage, 0)
 	for _, node := range chain {
@@ -33,34 +33,38 @@ func expandPreviousResponseHistory(prev *ResponsesObject) []OpenAIMessage {
 				Content: node.Instructions,
 			})
 		}
-		if prior, err := parseResponsesInput(node.StoredInput); err == nil {
-			messages = append(messages, prior...)
+		prior, err := parseResponsesInput(node.StoredInput)
+		if err != nil {
+			return nil, errors.New("历史对话无法读取，请重新发送完整对话")
 		}
+		messages = append(messages, prior...)
 		messages = append(messages, outputToMessages(node.Output)...)
 	}
 
-	return messages
+	return messages, nil
 }
 
 // collectAncestorChain walks previous_response_id backwards, returning the
 // chain in oldest-first order: [root, ..., parent, prev]. The walker is
-// bounded by maxResponsesHistoryDepth and a visited-set to short-circuit
-// any cycle in the stored data.
-func collectAncestorChain(prev *ResponsesObject) []*ResponsesObject {
+// guarded by cancellation and a visited-set to detect cycles in stored data.
+func collectAncestorChain(ctx context.Context, prev *ResponsesObject) ([]*ResponsesObject, error) {
 	stack := []*ResponsesObject{prev}
 	visited := map[string]bool{prev.ID: true}
 
 	cursor := prev
-	for depth := 0; depth < maxResponsesHistoryDepth; depth++ {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if cursor.PreviousResponseID == "" {
 			break
 		}
 		if visited[cursor.PreviousResponseID] {
-			break
+			return nil, errors.New("历史对话引用异常，请重新发送完整对话")
 		}
 		ancestor, err := loadResponse(cursor.PreviousResponseID)
 		if err != nil || ancestor == nil {
-			break
+			return nil, errors.New("历史对话已过期或缺失，请重新发送完整对话")
 		}
 		visited[ancestor.ID] = true
 		stack = append(stack, ancestor)
@@ -71,7 +75,7 @@ func collectAncestorChain(prev *ResponsesObject) []*ResponsesObject {
 	for i, j := 0, len(stack)-1; i < j; i, j = i+1, j-1 {
 		stack[i], stack[j] = stack[j], stack[i]
 	}
-	return stack
+	return stack, nil
 }
 
 func outputToMessages(items []ResponseOutputItem) []OpenAIMessage {

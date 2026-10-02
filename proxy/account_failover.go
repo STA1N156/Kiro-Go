@@ -11,6 +11,15 @@ import (
 )
 
 var errModelCooldown = errors.New("account model is cooling down")
+var errContextTooLong = errors.New("上下文长度过长")
+
+func isContextLengthError(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "content_length_exceeds_threshold") ||
+		strings.Contains(message, "input is too long") ||
+		strings.Contains(message, "context_length_exceeded") ||
+		message == errContextTooLong.Error()
+}
 
 // All generation paths, including admin tests, share model-specific empty-stream handling.
 func (h *Handler) callKiroAPIContext(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
@@ -25,8 +34,8 @@ func (h *Handler) callKiroAPIContext(ctx context.Context, account *config.Accoun
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if errors.Is(err, errEmptyKiroStream) {
-		until := h.pool.CooldownModel(account.ID, model, time.Duration(config.GetModelCooldownSeconds())*time.Second)
+	if seconds := config.GetModelCooldownSeconds(); seconds > 0 && errors.Is(err, errEmptyKiroStream) {
+		until := h.pool.CooldownModel(account.ID, model, time.Duration(seconds)*time.Second)
 		logger.Warnf("[AccountFailover] Account %s model %s returned no output; cooling down until %s", account.ID, model, until.UTC().Format(time.RFC3339))
 	}
 	return err
@@ -112,7 +121,7 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 
 	errMsg := err.Error()
 	switch {
-	case errors.Is(err, errEmptyKiroStream), errors.Is(err, errModelCooldown):
+	case errors.Is(err, errEmptyKiroStream), errors.Is(err, errModelCooldown), errors.Is(err, errContextTooLong):
 		// Already handled per model; do not cool down or disable the whole account.
 		return
 	case isOverageErrorMessage(errMsg):

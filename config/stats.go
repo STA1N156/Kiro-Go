@@ -49,7 +49,7 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 func GetModelCooldownSeconds() int {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	if cfg == nil || cfg.ModelCooldownSeconds < 1 || cfg.ModelCooldownSeconds > 604800 {
+	if cfg == nil || cfg.ModelCooldownSeconds < 0 || cfg.ModelCooldownSeconds > 604800 {
 		return 60
 	}
 	return cfg.ModelCooldownSeconds

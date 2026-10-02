@@ -80,9 +80,15 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 			if callID == "" {
 				callID, _ = obj["tool_call_id"].(string)
 			}
-			out := stringifyArbitrary(obj["output"])
-			if out == "" {
-				out = stringifyArbitrary(obj["content"])
+			out := obj["output"]
+			if out == nil || out == "" {
+				out = obj["content"]
+			}
+			switch out.(type) {
+			case string, []interface{}:
+				// Keep image/text blocks structured for the Kiro image converter.
+			default:
+				out = stringifyArbitrary(out)
 			}
 			messages = append(messages, OpenAIMessage{
 				Role:       "tool",

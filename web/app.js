@@ -699,10 +699,11 @@
     if (!quotaSummary) return;
     const total = quotaSummary.quotaTotal || 0;
     const remaining = Math.max(0, Math.min(total, quotaSummary.quotaRemaining || 0));
-    const percent = total > 0 ? (total - remaining) / total * 100 : 0;
+    const used = total - remaining;
+    const percent = total > 0 ? used / total * 100 : 0;
     const format = new Intl.NumberFormat(currentLang, { maximumFractionDigits: 1 });
     $('quotaSummaryValues').textContent = total > 0
-      ? `${format.format(remaining)} / ${format.format(total)}`
+      ? `${format.format(used)} / ${format.format(total)}`
       : t('stats.quotaUnknown');
     $('quotaSummaryPercent').textContent = total > 0 ? t('stats.quotaUsed', percent.toFixed(1)) : '—';
     $('quotaSummaryBar').setAttribute('aria-valuenow', percent.toFixed(1));
@@ -1804,7 +1805,7 @@
       toast(t('settings.accountRetryInvalid'), 'warning');
       return;
     }
-    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 604800) {
+    if (!Number.isInteger(seconds) || seconds < 0 || seconds > 604800) {
       toast(t('settings.modelCooldownInvalid'), 'warning');
       return;
     }

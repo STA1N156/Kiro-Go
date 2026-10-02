@@ -42,24 +42,6 @@ const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
 const toolResultImagePlaceholder = "[Tool returned an image; the image is attached to this message.]"
 
-// maxPayloadBytes is the upper bound for the serialized Kiro request body.
-// Kiro's upstream rejects oversized requests with HTTP 400
-// "Input is too long." (CONTENT_LENGTH_EXCEEDS_THRESHOLD). When a converted
-// payload exceeds this size we drop the oldest history turns (keeping the
-// system priming, the most recent turns, the active tool turn, and the current
-// message) and insert a placeholder note so the model knows context was elided.
-// The limit is kept conservatively below the observed upstream threshold to
-// leave room for headers and minor serialization overhead.
-const maxPayloadBytes = 900 * 1024
-
-// truncationPlaceholder is inserted in history where older turns were dropped to
-// fit within maxPayloadBytes.
-const truncationPlaceholder = "[Earlier conversation history was truncated to fit the model's input limit. Older messages and tool activity have been omitted.]"
-
-// minRecentHistoryTurns is the number of most-recent history entries always kept
-// (in addition to system priming and the active tool turn) when truncating.
-const minRecentHistoryTurns = 4
-
 // ParseModelAndThinking resolves a client-supplied model name to a Kiro model ID
 // and reports whether thinking mode was requested via the configured suffix.
 func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
@@ -100,12 +82,12 @@ func nativeThinkingFields(model string, thinking bool) map[string]interface{} {
 	if !strings.HasPrefix(strings.ToLower(model), "claude-") {
 		return nil
 	}
-	if !thinking && !strings.EqualFold(model, "claude-opus-5.5") {
+	if !thinking && !strings.EqualFold(model, "claude-opus-5.5") && !strings.EqualFold(model, "claude-sonnet-5.5") {
 		return map[string]interface{}{"thinking": ClaudeThinkingConfig{Type: "disabled"}}
 	}
 	effort := "high"
 	if !thinking {
-		effort = "low" // Opus 5.5 only accepts adaptive thinking.
+		effort = "low" // Opus/Sonnet 5.5 use low effort instead of disabled thinking.
 	}
 	return map[string]interface{}{
 		"thinking":      ClaudeThinkingConfig{Type: "adaptive", Display: "summarized"},
@@ -292,6 +274,9 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	}
 
 	// 构建最终内容
+	if !keepCurrentToolResults && len(currentToolResults) > 0 {
+		currentContent = joinHistoryText(currentContent, buildToolResultsContinuation(currentToolResults))
+	}
 	finalContent := ""
 	if currentContent != "" {
 		finalContent = currentContent
@@ -344,8 +329,6 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 			TopP:        req.TopP,
 		}
 	}
-
-	truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
 }
@@ -645,14 +628,10 @@ func extractToolResultContent(content interface{}) (string, []KiroImage) {
 	if s, ok := content.(string); ok {
 		return s, nil
 	}
-	if blocks, ok := content.([]interface{}); ok {
+	if blocks := contentBlocksAsMaps(content); len(blocks) > 0 {
 		var parts []string
 		var images []KiroImage
-		for _, b := range blocks {
-			block, ok := b.(map[string]interface{})
-			if !ok {
-				continue
-			}
+		for _, block := range blocks {
 			blockType, _ := block["type"].(string)
 			switch blockType {
 			case "image", "image_url", "input_image":
@@ -1075,7 +1054,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	var nonSystemMessages []OpenAIMessage
 
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
+		if msg.Role == "system" || msg.Role == "developer" {
 			if s := extractOpenAIMessageText(msg.Content); s != "" {
 				systemPrompt += s + "\n"
 			}
@@ -1210,6 +1189,9 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// 构建最终内容
+	if !keepCurrentToolResults && len(currentToolResults) > 0 {
+		currentContent = joinHistoryText(currentContent, buildToolResultsContinuation(currentToolResults))
+	}
 	finalContent := currentContent
 	if finalContent == "" {
 		if len(currentImages) > 0 {
@@ -1258,8 +1240,6 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	truncatePayloadToLimit(payload, systemPrompt != "")
-
 	return payload
 }
 
@@ -1280,19 +1260,12 @@ func extractOpenAIUserContent(content interface{}) (string, []KiroImage) {
 		}
 	}
 
-	if parts, ok := content.([]interface{}); ok {
-		for _, p := range parts {
-			part, ok := p.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			if t, ok := extractOpenAITextPart(part); ok {
-				text += t
-			}
-			if img := extractImageFromOpenAIPart(part); img != nil {
-				images = append(images, *img)
-			}
+	for _, part := range contentBlocksAsMaps(content) {
+		if t, ok := extractOpenAITextPart(part); ok {
+			text += t
+		}
+		if img := extractImageFromOpenAIPart(part); img != nil {
+			images = append(images, *img)
 		}
 	}
 
@@ -1590,137 +1563,6 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 	return trimLeadingAssistantHistory(cleaned)
 }
 
-// truncatePayloadToLimit drops the oldest conversation history turns until the
-// serialized payload fits within maxPayloadBytes. It preserves, in order:
-//   - the system priming pair (if present) at the front of history,
-//   - the most recent turns (at least minRecentHistoryTurns, and always the
-//     active tool turn that pairs with the current message),
-//   - the current message itself.
-//
-// A single placeholder note (truncationPlaceholder) is inserted where older
-// turns were removed so the model is aware context was elided. hasPriming
-// indicates whether history begins with the 2-entry system priming pair.
-func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
-	if payload == nil {
-		return
-	}
-	if payloadByteSize(payload) <= maxPayloadBytes {
-		return
-	}
-
-	history := payload.ConversationState.History
-	primingCount := 0
-	if hasPriming && len(history) >= 2 {
-		primingCount = 2
-	}
-
-	priming := history[:primingCount]
-	conversation := history[primingCount:]
-
-	// Compute the fixed overhead (everything except the trimmable conversation):
-	// priming, current message, inference config, profileArn, etc. We estimate by
-	// measuring the payload with an empty conversation tail, then add a budget for
-	// the placeholder and retained tail turns.
-	placeholderEntry := KiroHistoryMessage{
-		UserInputMessage: &KiroUserInputMessage{
-			Content: truncationPlaceholder,
-			ModelID: currentMessageModelID(payload),
-			Origin:  "AI_EDITOR",
-		},
-	}
-
-	// Precompute byte size of each conversation entry once (O(n)).
-	entrySizes := make([]int, len(conversation))
-	for i := range conversation {
-		entrySizes[i] = historyEntryByteSize(conversation[i])
-	}
-
-	// Base size: payload with priming only (no conversation), plus placeholder.
-	payload.ConversationState.History = priming
-	baseSize := payloadByteSize(payload) + historyEntryByteSize(placeholderEntry)
-
-	// Keep the largest suffix of the conversation that fits, but never fewer than
-	// minRecentHistoryTurns entries (so recent context is preserved).
-	keepFrom := len(conversation)
-	running := baseSize
-	for i := len(conversation) - 1; i >= 0; i-- {
-		running += entrySizes[i]
-		kept := len(conversation) - i
-		if running > maxPayloadBytes && kept > minRecentHistoryTurns {
-			break
-		}
-		keepFrom = i
-	}
-
-	tail := conversation[keepFrom:]
-	tail = dropLeadingAssistant(tail)
-
-	rebuilt := make([]KiroHistoryMessage, 0, len(priming)+1+len(tail))
-	rebuilt = append(rebuilt, priming...)
-	if keepFrom > 0 { // older turns were dropped → note the elision
-		rebuilt = append(rebuilt, placeholderEntry)
-	}
-	rebuilt = append(rebuilt, tail...)
-	payload.ConversationState.History = rebuilt
-
-	// If still too large (current message or retained tail alone exceeds the
-	// limit), shrink the current message content as a last resort.
-	if payloadByteSize(payload) > maxPayloadBytes {
-		truncateCurrentMessage(payload)
-	}
-}
-
-// historyEntryByteSize returns the serialized size of a single history entry,
-// including the surrounding JSON array delimiter overhead (1 byte for the comma).
-func historyEntryByteSize(entry KiroHistoryMessage) int {
-	raw, err := json.Marshal(entry)
-	if err != nil {
-		return 0
-	}
-	return len(raw) + 1
-}
-
-// dropLeadingAssistant removes a leading assistant message from a history tail so
-// it does not directly follow the placeholder user turn with a broken pairing.
-func dropLeadingAssistant(tail []KiroHistoryMessage) []KiroHistoryMessage {
-	for len(tail) > 0 && tail[0].AssistantResponseMessage != nil {
-		tail = tail[1:]
-	}
-	return tail
-}
-
-// payloadByteSize returns the serialized size of the payload in bytes.
-func payloadByteSize(payload *KiroPayload) int {
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return 0
-	}
-	return len(raw)
-}
-
-func currentMessageModelID(payload *KiroPayload) string {
-	return payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
-}
-
-// truncateCurrentMessage hard-truncates the current message content as a last
-// resort when even the minimal retained history plus current message exceeds the
-// limit.
-func truncateCurrentMessage(payload *KiroPayload) {
-	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
-	overhead := payloadByteSize(payload) - len(cur.Content)
-	budget := maxPayloadBytes - overhead
-	if budget < 0 {
-		budget = 0
-	}
-	if len(cur.Content) > budget {
-		if budget == 0 {
-			cur.Content = minimalFallbackUserContent
-			return
-		}
-		cur.Content = cur.Content[:budget]
-	}
-}
-
 func buildToolResultsContinuation(toolResults []KiroToolResult) string {
 	if len(toolResults) == 0 {
 		return minimalFallbackUserContent
@@ -1742,11 +1584,7 @@ func buildToolResultsContinuation(toolResults []KiroToolResult) string {
 		return minimalFallbackUserContent
 	}
 
-	joined := toolResultsContinuationPrefix + "\n\n" + strings.Join(parts, "\n\n")
-	if len(joined) > 4000 {
-		return joined[:4000]
-	}
-	return joined
+	return toolResultsContinuationPrefix + "\n\n" + strings.Join(parts, "\n\n")
 }
 
 func trimLeadingAssistantHistory(history []KiroHistoryMessage) []KiroHistoryMessage {
@@ -1837,7 +1675,7 @@ func extractImageFromOpenAIPart(part map[string]interface{}) *KiroImage {
 	partType, _ := part["type"].(string)
 	if partType != "" {
 		switch partType {
-		case "image", "image_url", "input_image", "file", "input_file":
+		case "image", "image_url", "input_image", "file", "input_file", "base64", "url":
 		default:
 			return nil
 		}
@@ -1901,7 +1739,8 @@ func extractImageFromOpenAIPart(part map[string]interface{}) *KiroImage {
 		if img := parseDataURL(raw); img != nil {
 			return img
 		}
-		if img := parseBase64Image(raw, "png"); img != nil {
+		format := strings.TrimPrefix(strings.ToLower(stringField(part, "media_type", "mediaType", "mime_type", "mimeType", "mime")), "image/")
+		if img := parseBase64Image(raw, format); img != nil {
 			return img
 		}
 	}

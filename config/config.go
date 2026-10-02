@@ -190,7 +190,7 @@ type Config struct {
 	NodeVersion             string          `json:"nodeVersion,omitempty"`
 	Accounts                []Account       `json:"accounts"` // Registered Kiro accounts
 	ModelCooldowns          []ModelCooldown `json:"modelCooldowns,omitempty"`
-	ModelCooldownSeconds    int             `json:"modelCooldownSeconds,omitempty"`
+	ModelCooldownSeconds    int             `json:"modelCooldownSeconds"`
 	MaxAccountRetryAttempts int             `json:"maxAccountRetryAttempts,omitempty"`
 
 	// Thinking mode configuration for extended reasoning output
@@ -301,11 +301,12 @@ func loadLocked() error {
 			// Create default configuration.
 			// Binds to 0.0.0.0 by default for Docker/container compatibility.
 			cfg = &Config{
-				Password:      "changeme",
-				Port:          8080,
-				Host:          "0.0.0.0",
-				RequireApiKey: false,
-				Accounts:      []Account{},
+				ModelCooldownSeconds: 60,
+				Password:             "changeme",
+				Port:                 8080,
+				Host:                 "0.0.0.0",
+				RequireApiKey:        false,
+				Accounts:             []Account{},
 			}
 			statsRevision, savedStatsRevision = 0, 0
 			return saveLocked()
@@ -317,11 +318,15 @@ func loadLocked() error {
 		Config
 		ModelCooldownMinutes int `json:"modelCooldownMinutes"` // Legacy storage only.
 	}
+	c.ModelCooldownSeconds = -1 // Distinguish an absent setting from explicitly disabled cooldowns.
 	if err := json.Unmarshal(data, &c); err != nil {
 		return err
 	}
-	if c.ModelCooldownSeconds == 0 && c.ModelCooldownMinutes >= 1 && c.ModelCooldownMinutes <= 10080 {
-		c.ModelCooldownSeconds = c.ModelCooldownMinutes * 60
+	if c.ModelCooldownSeconds == -1 {
+		c.ModelCooldownSeconds = 60
+		if c.ModelCooldownMinutes >= 1 && c.ModelCooldownMinutes <= 10080 {
+			c.ModelCooldownSeconds = c.ModelCooldownMinutes * 60
+		}
 	}
 	cfg = &c.Config
 	statsRevision, savedStatsRevision = 0, 0
@@ -941,8 +946,8 @@ func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
 }
 
 func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string, modelCooldownSeconds, maxAccountRetryAttempts *int) error {
-	if modelCooldownSeconds != nil && (*modelCooldownSeconds < 1 || *modelCooldownSeconds > 604800) {
-		return fmt.Errorf("model cooldown must be 1–604800 seconds")
+	if modelCooldownSeconds != nil && (*modelCooldownSeconds < 0 || *modelCooldownSeconds > 604800) {
+		return fmt.Errorf("model cooldown must be 0–604800 seconds")
 	}
 	if maxAccountRetryAttempts != nil && (*maxAccountRetryAttempts < 1 || *maxAccountRetryAttempts > 100) {
 		return fmt.Errorf("account attempts must be 1–100")

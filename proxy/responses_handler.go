@@ -51,7 +51,11 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 				fmt.Sprintf("previous_response_id not found: %v", loadErr))
 			return
 		}
-		historyMessages = expandPreviousResponseHistory(prev)
+		historyMessages, err = expandPreviousResponseHistory(r.Context(), prev)
+		if err != nil {
+			h.sendOpenAIError(w, 400, "invalid_request_error", err.Error())
+			return
+		}
 	}
 
 	inputMessages, err := parseResponsesInput(req.Input)
@@ -179,6 +183,10 @@ func (h *Handler) handleResponsesNonStream(
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
 		if requestContext(w).Err() != nil {
 			return
+		}
+		if err == errContextTooLong {
+			lastErr = err
+			break
 		}
 		if err != nil {
 			lastErr = err
@@ -535,6 +543,10 @@ func (h *Handler) handleResponsesStream(
 		if requestContext(w).Err() != nil {
 			return
 		}
+		if err == errContextTooLong {
+			lastErr = err
+			break
+		}
 		if err != nil {
 			if !responseStarted {
 				lastErr = err
@@ -657,13 +669,17 @@ func (h *Handler) handleResponsesStream(
 		return
 	}
 	h.recordFailureWithDetails("responses", model, "", lastErr)
+	errType := "server_error"
+	if lastErr == errContextTooLong {
+		errType = "invalid_request_error"
+	}
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
 		"response": map[string]interface{}{
 			"id":     respID,
 			"status": "failed",
 			"error": map[string]string{
-				"type":    "server_error",
+				"type":    errType,
 				"message": lastErr.Error(),
 			},
 		},

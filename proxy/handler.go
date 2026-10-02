@@ -1263,6 +1263,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if requestContext(w).Err() != nil {
 			return
 		}
+		if err == errContextTooLong {
+			lastErr = err
+			break
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1468,6 +1472,8 @@ func (h *Handler) appendRequestLog(entry RequestLog) {
 // classifyError categorizes an error message into a type for display.
 func classifyError(msg string) string {
 	switch {
+	case isContextLengthError(msg):
+		return "context_length"
 	case isQuotaErrorMessage(msg):
 		return "quota"
 	case isOverageErrorMessage(msg):
@@ -1554,6 +1560,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		if requestContext(w).Err() != nil {
 			return
 		}
+		if err == errContextTooLong {
+			lastErr = err
+			break
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -1612,6 +1622,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 }
 
 func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, message string) {
+	if isContextLengthError(message) {
+		status, errType, message = http.StatusBadRequest, "invalid_request_error", errContextTooLong.Error()
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1979,6 +1992,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		if requestContext(w).Err() != nil {
 			return
 		}
+		if err == errContextTooLong {
+			lastErr = err
+			break
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2103,6 +2120,10 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		if requestContext(w).Err() != nil {
 			return
 		}
+		if err == errContextTooLong {
+			lastErr = err
+			break
+		}
 		if err != nil {
 			lastErr = err
 			excluded[account.ID] = true
@@ -2146,6 +2167,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 }
 
 func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, message string) {
+	if isContextLengthError(message) {
+		status, errType, message = http.StatusBadRequest, "invalid_request_error", errContextTooLong.Error()
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{

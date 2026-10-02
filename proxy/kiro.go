@@ -496,6 +496,9 @@ endpointLoop:
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				if (resp.StatusCode == 400 || resp.StatusCode == 413) && isContextLengthError(string(errBody)) {
+					return errContextTooLong
+				}
 				lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, ep.Name, string(errBody))
 				// Authentication errors and payment errors are not retried across endpoints.
 				if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
