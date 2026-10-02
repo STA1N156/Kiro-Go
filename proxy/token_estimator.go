@@ -90,10 +90,19 @@ func estimateClaudeValueTokens(v interface{}) int {
 			total += estimateClaudeValueTokens(part)
 		}
 		return total
+	case []map[string]interface{}:
+		total := 0
+		for _, part := range value {
+			total += estimateClaudeValueTokens(part)
+		}
+		return total
 	case map[string]interface{}:
 		typeName, _ := value["type"].(string)
 		switch typeName {
-		case "text":
+		case "image", "image_url", "input_image":
+			// Image bytes/URLs are not text tokens; leave image usage to the upstream.
+			return 0
+		case "text", "input_text", "output_text":
 			if text, ok := value["text"].(string); ok {
 				return estimateApproxTokens(text)
 			}
@@ -177,18 +186,7 @@ func estimateOpenAIRequestInputTokens(req *OpenAIRequest) int {
 }
 
 func estimateOpenAIContentTokens(content interface{}) int {
-	switch value := content.(type) {
-	case nil:
-		return 0
-	case string:
-		return estimateApproxTokens(value)
-	default:
-		text := extractOpenAIMessageText(value)
-		if text != "" {
-			return estimateApproxTokens(text)
-		}
-		return estimateJSONTokens(value)
-	}
+	return estimateClaudeValueTokens(content)
 }
 
 func estimateOpenAIOutputTokens(content, reasoningContent string, toolUses []KiroToolUse) int {
