@@ -703,7 +703,7 @@
     const percent = total > 0 ? used / total * 100 : 0;
     const format = new Intl.NumberFormat(currentLang, { maximumFractionDigits: 1 });
     $('quotaSummaryValues').textContent = total > 0
-      ? `${format.format(used)} / ${format.format(total)}`
+      ? t('stats.quotaRemaining', format.format(remaining))
       : t('stats.quotaUnknown');
     $('quotaSummaryPercent').textContent = total > 0 ? t('stats.quotaUsed', percent.toFixed(1)) : '—';
     $('quotaSummaryBar').setAttribute('aria-valuenow', percent.toFixed(1));
