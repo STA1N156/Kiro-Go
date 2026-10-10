@@ -214,7 +214,7 @@ func (p *promptCacheProfile) cachedTokens(inputTokens int) int {
 		return 0
 	}
 	<-p.ready
-	limit := int(int64(inputTokens) * 96 / 100)
+	limit := int(int64(inputTokens) * 90 / 100)
 	if p.Exact {
 		return limit
 	}
