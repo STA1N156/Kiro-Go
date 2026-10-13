@@ -30,7 +30,11 @@ func (h *Handler) callKiroAPIContext(ctx context.Context, account *config.Accoun
 	if until := h.pool.ModelCooldownUntil(account.ID, model); time.Now().Before(until) {
 		return fmt.Errorf("%w: %s until %s", errModelCooldown, model, until.UTC().Format(time.RFC3339))
 	}
+	previousProfile := account.ProfileArn
 	err := CallKiroAPIContext(ctx, account, payload, callback)
+	if account.ProfileArn != "" && account.ProfileArn != previousProfile {
+		h.pool.UpdateProfileArn(account.ID, account.ProfileArn)
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

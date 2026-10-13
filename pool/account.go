@@ -6,7 +6,6 @@ import (
 	"kiro-go/config"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -18,6 +17,7 @@ type AccountPool struct {
 	accounts       []config.Account
 	totalAccounts  int
 	currentIndex   uint64
+	inFlight       map[string]int
 	cooldowns      map[string]time.Time       // 账号冷却时间
 	errorCounts    map[string]int             // 连续错误计数
 	modelLists     map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
@@ -74,80 +74,13 @@ func (p *AccountPool) Reload() {
 	}
 }
 
-// GetNext 获取下一个可用账号（加权轮询）
+// GetNext returns an available account without reserving a generation slot.
 func (p *AccountPool) GetNext() *config.Account {
 	return p.GetNextExcluding(nil)
 }
 
-// GetNextExcluding 获取下一个可用账号（加权轮询），并跳过指定账号。
 func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if len(p.accounts) == 0 {
-		return nil
-	}
-
-	allowOverUsage := config.GetAllowOverUsage()
-	now := time.Now()
-	n := len(p.accounts)
-	seen := make(map[string]bool)
-
-	// 加权轮询查找可用账号
-	for i := 0; i < n; i++ {
-		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
-		acc := &p.accounts[idx]
-
-		if excluded != nil && excluded[acc.ID] {
-			seen[acc.ID] = true
-			continue
-		}
-		if seen[acc.ID] {
-			continue
-		}
-
-		// 跳过冷却中的账号
-		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
-			seen[acc.ID] = true
-			continue
-		}
-
-		// 跳过即将过期的 Token
-		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
-			seen[acc.ID] = true
-			continue
-		}
-
-		// Skip accounts whose quota is exhausted, unless overrides apply.
-		if isQuotaBlocked(*acc, allowOverUsage) {
-			seen[acc.ID] = true
-			continue
-		}
-
-		return acc
-	}
-
-	// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
-	var best *config.Account
-	var earliest time.Time
-	for i := range p.accounts {
-		acc := &p.accounts[i]
-		if excluded != nil && excluded[acc.ID] {
-			continue
-		}
-		if isQuotaBlocked(*acc, allowOverUsage) {
-			continue
-		}
-		if cooldown, ok := p.cooldowns[acc.ID]; ok {
-			if best == nil || cooldown.Before(earliest) {
-				best = acc
-				earliest = cooldown
-			}
-		} else {
-			return acc
-		}
-	}
-	return best
+	return p.GetNextForModelExcluding("", excluded)
 }
 
 // SetModelList 缓存账号支持的模型集合（由 handler 在刷新后调用）
@@ -187,82 +120,98 @@ func (p *AccountPool) accountHasModel(accountID, model string) bool {
 	return list[strings.ToLower(strings.TrimSpace(model))]
 }
 
-// GetNextForModel 获取下一个支持指定模型的可用账号。
-// model 应为去掉 thinking 后缀的实际模型名。
-// 若无账号有该模型列表数据，行为与 GetNext 相同（乐观路由）。
 func (p *AccountPool) GetNextForModel(model string) *config.Account {
 	return p.GetNextForModelExcluding(model, nil)
 }
 
-// GetNextForModelExcluding 获取下一个支持指定模型的可用账号，并跳过指定账号。
 func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	model = strings.ToLower(strings.TrimSpace(model))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.selectAccountLocked(model, excluded)
+}
 
+// AcquireForModelExcluding selects and reserves atomically so concurrent requests
+// see each other's load. Reload does not discard reservations for active requests.
+func (p *AccountPool) AcquireForModelExcluding(model string, excluded map[string]bool) (*config.Account, func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	account := p.selectAccountLocked(model, excluded)
+	if account == nil {
+		return nil, nil
+	}
+	return account, p.trackAccountLocked(account.ID)
+}
+
+// TrackAccount includes explicit-account admin tests in the same load accounting.
+func (p *AccountPool) TrackAccount(id string) func() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.trackAccountLocked(id)
+}
+
+func (p *AccountPool) trackAccountLocked(id string) func() {
+	if p.inFlight == nil {
+		p.inFlight = make(map[string]int)
+	}
+	p.inFlight[id]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.inFlight[id] <= 1 {
+				delete(p.inFlight, id)
+			} else {
+				p.inFlight[id]--
+			}
+		})
+	}
+}
+
+func (p *AccountPool) selectAccountLocked(model string, excluded map[string]bool) *config.Account {
 	if len(p.accounts) == 0 {
 		return nil
 	}
-
-	allowOverUsage := config.GetAllowOverUsage()
+	model = strings.ToLower(strings.TrimSpace(model))
 	now := time.Now()
-	n := len(p.accounts)
+	allowOverUsage := config.GetAllowOverUsage()
+	start := int(p.currentIndex % uint64(len(p.accounts)))
+	p.currentIndex++
+	var best, fallback *config.Account
+	var earliest time.Time
 	seen := make(map[string]bool)
-
-	for i := 0; i < n; i++ {
-		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
-		acc := &p.accounts[idx]
-
-		if excluded != nil && excluded[acc.ID] {
-			seen[acc.ID] = true
-			continue
-		}
+	for offset := 0; offset < len(p.accounts); offset++ {
+		acc := &p.accounts[(start+offset)%len(p.accounts)]
 		if seen[acc.ID] {
 			continue
 		}
-		if !p.accountHasModel(acc.ID, model) || now.Before(p.modelCooldowns[[2]string{acc.ID, model}]) {
-			seen[acc.ID] = true
+		seen[acc.ID] = true
+		if excluded[acc.ID] || (acc.ExpiresAt > 0 && now.Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds) ||
+			isQuotaBlocked(*acc, allowOverUsage) ||
+			(model != "" && (!p.accountHasModel(acc.ID, model) || now.Before(p.modelCooldowns[[2]string{acc.ID, model}]))) {
 			continue
 		}
-		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
-			seen[acc.ID] = true
-			continue
-		}
-		if acc.ExpiresAt > 0 && time.Now().Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
-			seen[acc.ID] = true
-			continue
-		}
-		if isQuotaBlocked(*acc, allowOverUsage) {
-			seen[acc.ID] = true
-			continue
-		}
-		return acc
-	}
-
-	// fallback：找冷却时间最短且支持该模型的账号
-	var best *config.Account
-	var earliest time.Time
-	for i := range p.accounts {
-		acc := &p.accounts[i]
-		if excluded != nil && excluded[acc.ID] {
-			continue
-		}
-		if !p.accountHasModel(acc.ID, model) || now.Before(p.modelCooldowns[[2]string{acc.ID, model}]) {
-			continue
-		}
-		if isQuotaBlocked(*acc, allowOverUsage) {
-			continue
-		}
-		if cooldown, ok := p.cooldowns[acc.ID]; ok {
-			if best == nil || cooldown.Before(earliest) {
-				best = acc
-				earliest = cooldown
+		if until := p.cooldowns[acc.ID]; now.Before(until) {
+			if fallback == nil || until.Before(earliest) {
+				fallback, earliest = acc, until
 			}
-		} else {
-			return acc
+			continue
+		}
+		// Compare load per weight without floating point. Round-robin breaks ties.
+		if best == nil || int64(p.inFlight[acc.ID])*int64(effectiveWeight(best.Weight)) <
+			int64(p.inFlight[best.ID])*int64(effectiveWeight(acc.Weight)) {
+			best = acc
 		}
 	}
-	return best
+	if best == nil {
+		best = fallback
+	}
+	if best == nil {
+		return nil
+	}
+	// Callers may refresh credentials; never expose the pool's mutable entry.
+	account := *best
+	return &account
 }
 
 func (p *AccountPool) ModelCooldownUntil(id, model string) time.Time {
@@ -432,6 +381,17 @@ func (p *AccountPool) MarkOverLimit(id string) {
 // UpdateToken 更新账号 Token
 func (p *AccountPool) UpdateToken(id, accessToken, refreshToken string, expiresAt int64) {
 	p.UpdateCredentialState(nil, id, accessToken, refreshToken, expiresAt, "")
+}
+
+// Keep profile discovery cached after a caller updates its account snapshot.
+func (p *AccountPool) UpdateProfileArn(id, profileArn string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.accounts {
+		if p.accounts[i].ID == id {
+			p.accounts[i].ProfileArn = profileArn
+		}
+	}
 }
 
 // UpdateCredentialState publishes one persisted refresh result to both the

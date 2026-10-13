@@ -144,11 +144,13 @@ func (h *Handler) handleResponsesNonStream(
 		if requestContext(w).Err() != nil {
 			return
 		}
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
+		defer releaseAccount()
 		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			releaseAccount()
 			if requestContext(w).Err() != nil {
 				return
 			}
@@ -181,6 +183,7 @@ func (h *Handler) handleResponsesNonStream(
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		releaseAccount()
 		if requestContext(w).Err() != nil {
 			return
 		}
@@ -350,11 +353,13 @@ func (h *Handler) handleResponsesStream(
 		if requestContext(w).Err() != nil {
 			return
 		}
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
+		defer releaseAccount()
 		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			releaseAccount()
 			if requestContext(w).Err() != nil {
 				return
 			}
@@ -540,6 +545,7 @@ func (h *Handler) handleResponsesStream(
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		releaseAccount()
 		if requestContext(w).Err() != nil {
 			return
 		}

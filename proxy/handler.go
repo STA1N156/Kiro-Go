@@ -953,11 +953,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if requestContext(w).Err() != nil {
 			return
 		}
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
+		defer releaseAccount()
 		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			releaseAccount()
 			if requestContext(w).Err() != nil {
 				return
 			}
@@ -1127,18 +1129,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 						inThinkingBlock = true
 						dropTagThinking = !allowTagSource(&thinkingSource)
 						thinkingStarted = false
-					} else if forceFlush || len([]rune(textBuffer)) > 50 {
-						runes := []rune(textBuffer)
-						safeLen := len(runes)
-						if !forceFlush {
-							safeLen = max(0, len(runes)-15)
-						}
-						if safeLen > 0 {
-							sendText(string(runes[:safeLen]), 0)
-							textBuffer = string(runes[safeLen:])
-						}
-						break
 					} else {
+						safeLen := streamTextEnd(textBuffer, "<thinking>", forceFlush)
+						if safeLen > 0 {
+							sendText(textBuffer[:safeLen], 0)
+							textBuffer = textBuffer[safeLen:]
+						}
 						break
 					}
 				} else {
@@ -1174,20 +1170,17 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 						thinkingStarted = false
 						break
 					} else {
-						runes := []rune(textBuffer)
-						if len(runes) > 20 {
-							safeLen := len(runes) - 15
-							if safeLen > 0 {
-								if !dropTagThinking {
-									if !thinkingStarted {
-										sendText(string(runes[:safeLen]), 1)
-										thinkingStarted = true
-									} else {
-										sendText(string(runes[:safeLen]), 2)
-									}
+						safeLen := streamTextEnd(textBuffer, "</thinking>", false)
+						if safeLen > 0 {
+							if !dropTagThinking {
+								if !thinkingStarted {
+									sendText(textBuffer[:safeLen], 1)
+									thinkingStarted = true
+								} else {
+									sendText(textBuffer[:safeLen], 2)
 								}
-								textBuffer = string(runes[safeLen:])
 							}
+							textBuffer = textBuffer[safeLen:]
 						}
 						break
 					}
@@ -1260,6 +1253,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		releaseAccount()
 		if requestContext(w).Err() != nil {
 			return
 		}
@@ -1513,11 +1507,13 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		if requestContext(w).Err() != nil {
 			return
 		}
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
+		defer releaseAccount()
 		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			releaseAccount()
 			if requestContext(w).Err() != nil {
 				return
 			}
@@ -1557,6 +1553,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		releaseAccount()
 		if requestContext(w).Err() != nil {
 			return
 		}
@@ -1702,11 +1699,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		if requestContext(w).Err() != nil {
 			return
 		}
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
+		defer releaseAccount()
 		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			releaseAccount()
 			if requestContext(w).Err() != nil {
 				return
 			}
@@ -1858,18 +1857,12 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 						inThinkingBlock = true
 						dropTagThinking = !allowTagSource(&thinkingSource)
 						thinkingStarted = false
-					} else if forceFlush || len([]rune(textBuffer)) > 50 {
-						runes := []rune(textBuffer)
-						safeLen := len(runes)
-						if !forceFlush {
-							safeLen = max(0, len(runes)-15)
-						}
-						if safeLen > 0 {
-							sendChunk(string(runes[:safeLen]), 0)
-							textBuffer = string(runes[safeLen:])
-						}
-						break
 					} else {
+						safeLen := streamTextEnd(textBuffer, "<thinking>", forceFlush)
+						if safeLen > 0 {
+							sendChunk(textBuffer[:safeLen], 0)
+							textBuffer = textBuffer[safeLen:]
+						}
 						break
 					}
 				} else {
@@ -1905,20 +1898,17 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 						thinkingStarted = false
 						break
 					} else {
-						runes := []rune(textBuffer)
-						if len(runes) > 20 {
-							safeLen := len(runes) - 15
-							if safeLen > 0 {
-								if !dropTagThinking {
-									if !thinkingStarted {
-										sendChunk(string(runes[:safeLen]), 1)
-										thinkingStarted = true
-									} else {
-										sendChunk(string(runes[:safeLen]), 2)
-									}
+						safeLen := streamTextEnd(textBuffer, "</thinking>", false)
+						if safeLen > 0 {
+							if !dropTagThinking {
+								if !thinkingStarted {
+									sendChunk(textBuffer[:safeLen], 1)
+									thinkingStarted = true
+								} else {
+									sendChunk(textBuffer[:safeLen], 2)
 								}
-								textBuffer = string(runes[safeLen:])
 							}
+							textBuffer = textBuffer[safeLen:]
 						}
 						break
 					}
@@ -1989,6 +1979,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		releaseAccount()
 		if requestContext(w).Err() != nil {
 			return
 		}
@@ -2080,11 +2071,13 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		if requestContext(w).Err() != nil {
 			return
 		}
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
+		defer releaseAccount()
 		if err := h.ensureValidTokenContext(requestContext(w), account); err != nil {
+			releaseAccount()
 			if requestContext(w).Err() != nil {
 				return
 			}
@@ -2117,6 +2110,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
+		releaseAccount()
 		if requestContext(w).Err() != nil {
 			return
 		}
@@ -4151,7 +4145,10 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		OnContextUsage: func(pct float64) {},
 	}
 
+	releaseAccount := h.pool.TrackAccount(account.ID)
+	defer releaseAccount()
 	err := h.callKiroAPIContext(r.Context(), account, kiroPayload, callback)
+	releaseAccount()
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})

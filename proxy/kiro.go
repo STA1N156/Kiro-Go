@@ -379,15 +379,6 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 	}
 	setPayloadProfileArnForAccount(payload, account)
 
-	if _, err := json.Marshal(payload); err != nil {
-		return err
-	}
-
-	// Debug: dump full payload for troubleshooting upstream rejections
-	if payloadJSON, err := json.Marshal(payload); err == nil {
-		logger.Debugf("[KiroAPI] Request payload: %s", string(payloadJSON))
-	}
-
 	// Wrap OnToolUse to restore original tool names for the client.
 	if callback != nil && callback.OnToolUse != nil && len(payload.ToolNameMap) > 0 {
 		originalOnToolUse := callback.OnToolUse
@@ -417,6 +408,8 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 	isAPIKey := config.IsAPIKeyAccount(account)
 
 	var lastErr error
+	var reqBody []byte
+	var bodyOrigin string
 endpointLoop:
 	for epIndex, ep := range endpoints {
 		if err := ctx.Err(); err != nil {
@@ -432,7 +425,17 @@ endpointLoop:
 			epURL = cliRuntimeURL(account)
 		}
 
-		reqBody, _ := json.Marshal(payload)
+		if reqBody == nil || bodyOrigin != ep.Origin {
+			var err error
+			reqBody, err = json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			bodyOrigin = ep.Origin
+			if logger.GetLevel() == logger.LevelDebug {
+				logger.Debugf("[KiroAPI] Request payload: %s", reqBody)
+			}
+		}
 		host := ""
 		if parsedURL, parseErr := url.Parse(epURL); parseErr == nil {
 			host = parsedURL.Host
@@ -441,7 +444,7 @@ endpointLoop:
 		invocationID := uuid.New().String()
 
 		for streamAttempt := 1; streamAttempt <= maxStreamAttemptsPerEndpoint; streamAttempt++ {
-			// Requests and bodies cannot be reused after an HTTP attempt.
+			// Each attempt gets a fresh reader over the reusable payload bytes.
 			req, err := http.NewRequestWithContext(ctx, "POST", epURL, bytes.NewReader(reqBody))
 			if err != nil {
 				lastErr = err
@@ -526,6 +529,10 @@ endpointLoop:
 			// retrying after their callback mutated state would concatenate two
 			// attempts even if no network bytes were flushed yet.
 			if emitted {
+				return err
+			}
+			var streamErr *kiroStreamError
+			if errors.As(err, &streamErr) || errors.Is(err, errContextTooLong) {
 				return err
 			}
 			if !isRetryableStreamError(err) {
@@ -617,8 +624,8 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 		totalLength := int(prelude[0])<<24 | int(prelude[1])<<16 | int(prelude[2])<<8 | int(prelude[3])
 		headersLength := int(prelude[4])<<24 | int(prelude[5])<<16 | int(prelude[6])<<8 | int(prelude[7])
 
-		if totalLength < 16 {
-			continue
+		if totalLength < 16 || headersLength > totalLength-16 {
+			return emitted, fmt.Errorf("invalid Kiro stream frame length")
 		}
 
 		// Read the remaining message bytes.
@@ -629,25 +636,31 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 			return emitted, err
 		}
 
-		if headersLength > len(msgBuf)-4 {
-			continue
+		headers, err := parseKiroStreamHeaders(msgBuf[:headersLength])
+		if err != nil {
+			return emitted, fmt.Errorf("invalid Kiro stream headers: %w", err)
 		}
 
-		eventType := extractEventType(msgBuf[0:headersLength])
 		payloadBytes := msgBuf[headersLength : len(msgBuf)-4]
-		if len(payloadBytes) == 0 {
-			continue
-		}
-
 		var event map[string]interface{}
-		if err := json.Unmarshal(payloadBytes, &event); err != nil {
+		var jsonErr error
+		if len(payloadBytes) > 0 {
+			jsonErr = json.Unmarshal(payloadBytes, &event)
+		}
+		if err := parseKiroStreamError(headers, event, payloadBytes); err != nil {
+			return emitted, err
+		}
+		if jsonErr != nil {
+			return emitted, fmt.Errorf("invalid Kiro stream JSON: %w", jsonErr)
+		}
+		if len(payloadBytes) == 0 {
 			continue
 		}
 
 		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
 
 		// Dispatch by event type.
-		switch eventType {
+		switch headers.eventType {
 		// Both text streams are passed through verbatim. Kiro sends
 		// assistantResponseEvent and reasoningContentEvent as pure incremental deltas
 		// (verified against real upstream traffic), never as cumulative snapshots, and
@@ -975,58 +988,4 @@ func firstBoolField(m map[string]interface{}, keys ...string) bool {
 		}
 	}
 	return false
-}
-
-// extractEventType extracts the event type string from AWS Event Stream message headers.
-func extractEventType(headers []byte) string {
-	offset := 0
-	for offset < len(headers) {
-		if offset >= len(headers) {
-			break
-		}
-		nameLen := int(headers[offset])
-		offset++
-		if offset+nameLen > len(headers) {
-			break
-		}
-		name := string(headers[offset : offset+nameLen])
-		offset += nameLen
-		if offset >= len(headers) {
-			break
-		}
-		valueType := headers[offset]
-		offset++
-
-		if valueType == 7 { // String
-			if offset+2 > len(headers) {
-				break
-			}
-			valueLen := int(headers[offset])<<8 | int(headers[offset+1])
-			offset += 2
-			if offset+valueLen > len(headers) {
-				break
-			}
-			value := string(headers[offset : offset+valueLen])
-			offset += valueLen
-			if name == ":event-type" {
-				return value
-			}
-			continue
-		}
-
-		// Skip other value types by their fixed byte widths.
-		skipSizes := map[byte]int{0: 0, 1: 0, 2: 1, 3: 2, 4: 4, 5: 8, 8: 8, 9: 16}
-		if valueType == 6 {
-			if offset+2 > len(headers) {
-				break
-			}
-			l := int(headers[offset])<<8 | int(headers[offset+1])
-			offset += 2 + l
-		} else if skip, ok := skipSizes[valueType]; ok {
-			offset += skip
-		} else {
-			break
-		}
-	}
-	return ""
 }

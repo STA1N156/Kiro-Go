@@ -369,11 +369,13 @@ func (h *Handler) performWebSearch(ctx context.Context, model, query string) (*W
 		if err := ctx.Err(); err != nil {
 			return nil, "", nil, err
 		}
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account, releaseAccount := h.pool.AcquireForModelExcluding(model, excluded)
 		if account == nil {
 			break
 		}
+		defer releaseAccount()
 		if err := h.ensureValidTokenContext(ctx, account); err != nil {
+			releaseAccount()
 			if ctx.Err() != nil {
 				return nil, "", nil, ctx.Err()
 			}
@@ -385,6 +387,7 @@ func (h *Handler) performWebSearch(ctx context.Context, model, query string) (*W
 
 		toolUseID, mcpReq := createMcpRequest(query)
 		mcpResp, err := callMcpAPI(ctx, account, mcpReq)
+		releaseAccount()
 		if ctx.Err() != nil {
 			return nil, "", nil, ctx.Err()
 		}

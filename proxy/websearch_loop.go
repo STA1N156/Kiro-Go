@@ -153,11 +153,13 @@ func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeReque
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		account := h.pool.GetNextForModelExcluding(req.Model, excluded)
+		account, releaseAccount := h.pool.AcquireForModelExcluding(req.Model, excluded)
 		if account == nil {
 			break
 		}
+		defer releaseAccount()
 		if err := h.ensureValidTokenContext(ctx, account); err != nil {
+			releaseAccount()
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
 			}
@@ -205,6 +207,7 @@ func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeReque
 		}
 
 		err := h.callKiroAPIContext(ctx, account, payload, callback)
+		releaseAccount()
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
