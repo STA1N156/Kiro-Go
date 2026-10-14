@@ -41,6 +41,7 @@ type promptCacheProfile struct {
 	MatchedWeight  int
 	ObservedTokens int
 	Exact          bool
+	MaxHitPercent  float64
 }
 type promptCacheUsage struct {
 	CacheReadInputTokens int
@@ -60,7 +61,8 @@ func newPromptCacheTracker() *promptCacheTracker {
 // Hashing runs alongside upstream I/O. At saturation skip caching instead of
 // queueing unbounded conversations or delaying first byte.
 func (t *promptCacheTracker) begin(model string, build func(*cacheFingerprintBuilder)) *promptCacheProfile {
-	if t == nil || !config.GetLocalCacheSettings().Enabled {
+	settings := config.GetLocalCacheSettings()
+	if t == nil || !settings.Enabled {
 		return nil
 	}
 	select {
@@ -68,7 +70,7 @@ func (t *promptCacheTracker) begin(model string, build func(*cacheFingerprintBui
 	default:
 		return nil
 	}
-	p := &promptCacheProfile{ready: make(chan struct{}), Model: sha256.Sum256([]byte(model))}
+	p := &promptCacheProfile{ready: make(chan struct{}), Model: sha256.Sum256([]byte(model)), MaxHitPercent: *settings.MaxHitPercent}
 	go func() {
 		defer func() { <-t.jobs; close(p.ready) }()
 		b := &cacheFingerprintBuilder{hasher: sha256.New(), ids: make(map[string]string), profile: p}
@@ -214,7 +216,7 @@ func (p *promptCacheProfile) cachedTokens(inputTokens int) int {
 		return 0
 	}
 	<-p.ready
-	limit := int(int64(inputTokens) * 90 / 100)
+	limit := int(float64(inputTokens) * p.MaxHitPercent / 100)
 	if p.Exact {
 		return limit
 	}

@@ -4004,9 +4004,9 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.LocalCache != nil {
-		if req.LocalCache.TTLMinutes < 1 || req.LocalCache.TTLMinutes > 10080 {
+		if err := config.ValidateLocalCacheSettings(*req.LocalCache); err != nil {
 			w.WriteHeader(400)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Cache duration must be 1–10080 minutes"})
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 		if err := config.UpdateLocalCacheSettings(*req.LocalCache); err != nil {

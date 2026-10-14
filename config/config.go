@@ -208,9 +208,10 @@ type Config struct {
 	// AllowOverUsage allows accounts to continue serving requests even when their
 	// usage quota has been exhausted. When enabled, the pool will not skip accounts
 	// solely because usageCurrent >= usageLimit.
-	AllowOverUsage       bool  `json:"allowOverUsage,omitempty"`
-	LocalCacheEnabled    *bool `json:"localCacheEnabled,omitempty"`
-	LocalCacheTTLMinutes int   `json:"localCacheTTLMinutes,omitempty"`
+	AllowOverUsage          bool     `json:"allowOverUsage,omitempty"`
+	LocalCacheEnabled       *bool    `json:"localCacheEnabled,omitempty"`
+	LocalCacheTTLMinutes    int      `json:"localCacheTTLMinutes,omitempty"`
+	LocalCacheMaxHitPercent *float64 `json:"localCacheMaxHitPercent,omitempty"`
 
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",

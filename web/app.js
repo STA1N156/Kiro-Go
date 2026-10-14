@@ -1637,6 +1637,7 @@
     $('allowOverUsage').checked = d.allowOverUsage || false;
     $('localCacheEnabled').checked = d.localCache?.enabled !== false;
     $('localCacheTTL').value = d.localCache?.ttlMinutes ?? 5;
+    $('localCacheMaxHitPercent').value = d.localCache?.maxHitPercent ?? 90;
     $('modelCooldownSeconds').value = d.modelCooldownSeconds ?? 60;
     $('maxAccountRetryAttempts').value = d.maxAccountRetryAttempts ?? 7;
     await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
@@ -1648,11 +1649,17 @@
       toast(t('settings.localCacheTTLHint'), 'warning');
       return;
     }
+    const rawMaxHitPercent = $('localCacheMaxHitPercent').value.trim();
+    const maxHitPercent = Number(rawMaxHitPercent);
+    if (!rawMaxHitPercent || !Number.isFinite(maxHitPercent) || maxHitPercent < 0 || maxHitPercent > 100) {
+      toast(t('settings.localCacheMaxHitPercentHint'), 'warning');
+      return;
+    }
     const button = $('saveLocalCacheBtn');
     button.disabled = true;
     try {
       const res = await api('/settings', { method: 'POST', body: JSON.stringify({
-        localCache: { enabled: $('localCacheEnabled').checked, ttlMinutes }
+        localCache: { enabled: $('localCacheEnabled').checked, ttlMinutes, maxHitPercent }
       }) });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || t('common.saveFailed'));
