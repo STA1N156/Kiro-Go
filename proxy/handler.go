@@ -10,7 +10,6 @@ import (
 	"kiro-go/config"
 	"kiro-go/logger"
 	"kiro-go/pool"
-	"math"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -2461,6 +2460,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 	for i, a := range accounts {
 		// 获取运行时统计
 		stats := statsMap[a.ID]
+		quotaTotal, quotaRemaining := a.QuotaTotals(now)
 
 		result[i] = map[string]interface{}{
 			"id":                a.ID,
@@ -2491,6 +2491,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"usageCurrent":      a.UsageCurrent,
 			"usageLimit":        a.UsageLimit,
 			"usagePercent":      a.UsagePercent,
+			"quotaTotal":        quotaTotal,
+			"quotaRemaining":    quotaRemaining,
 			"nextResetDate":     a.NextResetDate,
 			"lastRefresh":       a.LastRefresh,
 			"trialUsageCurrent": a.TrialUsageCurrent,
@@ -2498,6 +2500,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"trialUsagePercent": a.TrialUsagePercent,
 			"trialStatus":       a.TrialStatus,
 			"trialExpiresAt":    a.TrialExpiresAt,
+			"bonuses":           a.Bonuses,
 			"requestCount":      stats.RequestCount,
 			"errorCount":        stats.ErrorCount,
 			"totalTokens":       stats.TotalTokens,
@@ -3893,18 +3896,11 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 	var quotaTotal, quotaRemaining float64
-	addQuota := func(limit, used float64) {
-		if limit > 0 {
-			quotaTotal += limit
-			quotaRemaining += math.Max(0, limit-math.Max(0, used))
-		}
-	}
 	now := time.Now().Unix()
 	for _, account := range config.GetAccounts() {
-		addQuota(account.UsageLimit, account.UsageCurrent)
-		if account.TrialStatus == "ACTIVE" && (account.TrialExpiresAt == 0 || account.TrialExpiresAt > now) {
-			addQuota(account.TrialUsageLimit, account.TrialUsageCurrent)
-		}
+		total, remaining := account.QuotaTotals(now)
+		quotaTotal += total
+		quotaRemaining += remaining
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"quotaTotal":      quotaTotal,
@@ -4243,6 +4239,7 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	h.pool.Reload()
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
@@ -4323,6 +4320,7 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"trialUsagePercent": account.TrialUsagePercent,
 		"trialStatus":       account.TrialStatus,
 		"trialExpiresAt":    account.TrialExpiresAt,
+		"bonuses":           account.Bonuses,
 		"requestCount":      stats.RequestCount,
 		"errorCount":        stats.ErrorCount,
 		"totalTokens":       stats.TotalTokens,

@@ -901,15 +901,6 @@
     }
     return '';
   }
-  function formatTrialExpiry(ts) {
-    if (!ts) return '';
-    const date = new Date(ts * 1000);
-    const diffDays = Math.ceil((date - new Date()) / (1000 * 60 * 60 * 24));
-    if (diffDays < 0) return '(' + t('accounts.trialExpired') + ')';
-    if (diffDays === 0) return '(' + t('accounts.trialToday') + ')';
-    if (diffDays <= 7) return '(' + diffDays + t('accounts.trialDays') + ')';
-    return '';
-  }
   function formatAuthMethod(method) {
     if (!method) return '-';
     const normalized = String(method).toLowerCase();
@@ -921,6 +912,10 @@
     if (normalized === 'github') return t('local.providerGithub');
     if (normalized === 'google') return t('local.providerGoogle');
     return method;
+  }
+  function activeBonuses(a) {
+    const now = Date.now() / 1000;
+    return (a.bonuses || []).filter(b => b.status === 'ACTIVE' && b.usageLimit > 0 && (!b.expiresAt || b.expiresAt > now));
   }
   function getStatusBadge(a) {
     const out = [];
@@ -999,10 +994,10 @@
       return;
     }
     container.innerHTML = filtered.map(a => {
-      const usagePct = (a.usagePercent || 0) * 100;
+      const quotaTotal = a.quotaTotal || 0;
+      const quotaUsed = Math.max(0, quotaTotal - (a.quotaRemaining || 0));
+      const usagePct = quotaTotal > 0 ? quotaUsed / quotaTotal * 100 : 0;
       const usageClass = usagePct > 90 ? 'critical' : usagePct > 70 ? 'high' : '';
-      const trialPct = (a.trialUsagePercent || 0) * 100;
-      const trialClass = trialPct > 90 ? 'critical' : trialPct > 70 ? 'high' : '';
       const isSelected = selectedAccounts.has(a.id);
       const weight = a.weight || 0;
       const weightBadge = weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
@@ -1046,17 +1041,11 @@
         '</div>' +
         '</div>' +
         renderModelCooldowns(a) +
-        (a.usageLimit > 0 ?
+        (quotaTotal > 0 ?
           '<div class="account-usage">' +
-          '<div class="usage-label">' + escapeHtml(t('accounts.mainQuota')) + '</div>' +
+          '<div class="usage-label">' + escapeHtml(t('accounts.totalQuota')) + '</div>' +
           '<div class="usage-bar"><div class="usage-fill ' + usageClass + '" data-usage-pct="' + escapeAttr(usagePct) + '"></div></div>' +
-          '<div class="usage-text"><span>' + (a.usageCurrent != null ? a.usageCurrent.toFixed(1) : 0) + ' / ' + (a.usageLimit != null ? a.usageLimit.toFixed(0) : 0) + '</span><span>' + usagePct.toFixed(1) + '%</span></div>' +
-          '</div>' : '') +
-        (a.trialUsageLimit > 0 ?
-          '<div class="account-usage">' +
-          '<div class="usage-label">' + escapeHtml(t('accounts.trialQuota')) + ' ' + escapeHtml(formatTrialExpiry(a.trialExpiresAt)) + '</div>' +
-          '<div class="usage-bar"><div class="usage-fill ' + trialClass + '" data-usage-pct="' + escapeAttr(trialPct) + '"></div></div>' +
-          '<div class="usage-text"><span>' + (a.trialUsageCurrent != null ? a.trialUsageCurrent.toFixed(1) : 0) + ' / ' + (a.trialUsageLimit != null ? a.trialUsageLimit.toFixed(0) : 0) + '</span><span>' + trialPct.toFixed(1) + '%</span></div>' +
+          '<div class="usage-text"><span>' + quotaUsed.toFixed(1) + ' / ' + quotaTotal.toFixed(0) + '</span><span>' + usagePct.toFixed(1) + '%</span></div>' +
           '</div>' : '') +
         '<div class="account-stats">' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
@@ -1077,7 +1066,7 @@
     try {
       const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
       const d = await res.json();
-      if (d.success) loadAccounts();
+      if (d.success) { loadAccounts(); loadStats(); }
       else toastError(t('accounts.refreshFailed') + ': ' + (d.error || ''));
     } catch (e) {
       toastError(t('accounts.refreshFailed'));
@@ -1322,6 +1311,10 @@
       detailItem(t('detail.tokenExpiry'), a.expiresAt ? new Date(a.expiresAt * 1000).toLocaleString() : '-') +
       detailItem(t('detail.mainQuota'), (a.usageCurrent != null ? a.usageCurrent.toFixed(1) : 0) + ' / ' + (a.usageLimit != null ? a.usageLimit.toFixed(0) : 0)) +
       detailItem(t('detail.resetDate'), a.nextResetDate || '-') +
+      activeBonuses(a).map(b =>
+        detailItem(t('accounts.bonusQuota'), (b.currentUsage || 0).toFixed(1) + ' / ' + b.usageLimit.toFixed(0)) +
+        detailItem(t('accounts.bonusExpiry'), b.expiresAt ? new Date(b.expiresAt * 1000).toLocaleString() : '-')
+      ).join('') +
       (a.trialUsageLimit > 0 ?
         detailItem(t('detail.trialQuota'), (a.trialUsageCurrent != null ? a.trialUsageCurrent.toFixed(1) : 0) + ' / ' + a.trialUsageLimit.toFixed(0)) +
         detailItem(t('detail.trialStatus'), a.trialStatus || '-') +

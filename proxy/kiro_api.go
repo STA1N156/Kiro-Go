@@ -753,6 +753,13 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 		if info.UsageLimit > 0 {
 			info.UsagePercent = info.UsageCurrent / info.UsageLimit
 		}
+		for _, bonus := range breakdown.Bonuses {
+			expiresAt, _ := bonus.ExpiresAt.Float64()
+			info.Bonuses = append(info.Bonuses, config.CreditBonus{
+				DisplayName: bonus.DisplayName, CurrentUsage: bonus.CurrentUsage,
+				UsageLimit: bonus.UsageLimit, ExpiresAt: int64(expiresAt), Status: bonus.Status,
+			})
+		}
 	}
 
 	// 解析重置日期

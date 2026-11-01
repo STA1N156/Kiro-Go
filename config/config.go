@@ -122,11 +122,12 @@ type Account struct {
 	LastRefresh   int64   `json:"lastRefresh,omitempty"`   // Last info refresh timestamp
 
 	// Trial usage tracking
-	TrialUsageCurrent float64 `json:"trialUsageCurrent,omitempty"` // Trial quota current usage
-	TrialUsageLimit   float64 `json:"trialUsageLimit,omitempty"`   // Trial quota total limit
-	TrialUsagePercent float64 `json:"trialUsagePercent,omitempty"` // Trial quota usage percentage (0.0-1.0)
-	TrialStatus       string  `json:"trialStatus,omitempty"`       // Trial status: ACTIVE, EXPIRED, NONE
-	TrialExpiresAt    int64   `json:"trialExpiresAt,omitempty"`    // Trial expiration timestamp (Unix seconds)
+	TrialUsageCurrent float64       `json:"trialUsageCurrent,omitempty"` // Trial quota current usage
+	TrialUsageLimit   float64       `json:"trialUsageLimit,omitempty"`   // Trial quota total limit
+	TrialUsagePercent float64       `json:"trialUsagePercent,omitempty"` // Trial quota usage percentage (0.0-1.0)
+	TrialStatus       string        `json:"trialStatus,omitempty"`       // Trial status: ACTIVE, EXPIRED, NONE
+	TrialExpiresAt    int64         `json:"trialExpiresAt,omitempty"`    // Trial expiration timestamp (Unix seconds)
+	Bonuses           []CreditBonus `json:"bonuses,omitempty"`
 
 	// Runtime statistics (updated during operation)
 	RequestCount int     `json:"requestCount,omitempty"` // Total requests processed
@@ -268,6 +269,7 @@ type AccountInfo struct {
 	TrialUsagePercent float64
 	TrialStatus       string
 	TrialExpiresAt    int64
+	Bonuses           []CreditBonus
 }
 
 // Version current version
@@ -1027,6 +1029,7 @@ func UpdateAccountInfo(id string, info AccountInfo) error {
 			cfg.Accounts[i].TrialUsagePercent = info.TrialUsagePercent
 			cfg.Accounts[i].TrialStatus = info.TrialStatus
 			cfg.Accounts[i].TrialExpiresAt = info.TrialExpiresAt
+			cfg.Accounts[i].Bonuses = info.Bonuses
 			return Save()
 		}
 	}

@@ -514,7 +514,8 @@ func (p *AccountPool) GetAllAccounts() []config.Account {
 }
 
 func isOverUsageLimit(acc config.Account) bool {
-	return acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit
+	total, remaining := acc.QuotaTotals(time.Now().Unix())
+	return total > 0 && remaining <= 0
 }
 
 // isQuotaBlocked reports whether an over-quota account should be skipped:
