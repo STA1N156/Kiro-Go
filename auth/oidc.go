@@ -195,7 +195,6 @@ func refreshSocialToken(ctx context.Context, account *config.Account, client *ht
 func applyKiroIDCRefreshHeaders(req *http.Request, region string, account *config.Account) {
 	clientCfg := config.GetKiroClientConfig()
 	const identitySDK = "3.980.0"
-	version := config.KiroVersionForAccount(account)
 	req.Header.Set("Content-Type", "application/json")
 	if region != "" {
 		req.Host = fmt.Sprintf("oidc.%s.amazonaws.com", region)
@@ -203,15 +202,16 @@ func applyKiroIDCRefreshHeaders(req *http.Request, region string, account *confi
 	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.NewString())
 	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=4")
 	req.Header.Set("Connection", "close")
-	req.Header.Set("X-Amz-User-Agent", "aws-sdk-js/"+identitySDK+" KiroIDE-"+version)
+	req.Header.Set("X-Amz-User-Agent", "aws-sdk-js/"+identitySDK+" KiroIDE")
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set(
 		"User-Agent",
 		fmt.Sprintf(
-			"aws-sdk-js/%s ua/2.1 os/%s lang/js md/nodejs#%s m/E",
+			"aws-sdk-js/%s ua/2.1 os/%s lang/js md/nodejs#%s api/sso-oidc#%s m/E KiroIDE",
 			identitySDK,
 			clientCfg.SystemVersion,
 			config.KiroNodeVersionForAccount(account),
+			identitySDK,
 		),
 	)
 }

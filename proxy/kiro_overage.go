@@ -130,7 +130,7 @@ func SetOverageStatus(account *config.Account, enabled bool) (*OverageSnapshot, 
 	if err != nil {
 		return nil, err
 	}
-	applyKiroManagementHeaders(req, account, "kirocontrolplanebearer", "1")
+	applyKiroManagementHeaders(req, account, "kirocontrolplanebearer", "1", true)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)

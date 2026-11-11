@@ -386,6 +386,8 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 		req.Header.Set("x-amzn-codewhisperer-optout", "true")
 		req.Header.Set("Amz-Sdk-Request", fmt.Sprintf("attempt=1; max=%d", kiroSDKMaxAttempts))
 		req.Header.Set("Amz-Sdk-Invocation-Id", invocationID)
+		req.Header.Set("x-amzn-kiro-client-attribution", "kiro-ide")
+		req.Header.Set("x-kiro-attempt", fmt.Sprintf("1;max=%d", kiroSDKMaxAttempts))
 
 		resp, err := GetClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 		if err != nil {

@@ -90,7 +90,7 @@ func callKiroResponsesAPI(
 	requestConfig kiroRequestConfig,
 ) error {
 	if !payload.ResponsesAgentContinuationSet {
-		payload.ConversationState.AgentContinuationId = uuid.NewString()
+		payload.ConversationState.AgentContinuationId = uuid.NewSHA1(uuid.NameSpaceURL, []byte(uuid.NewString())).String()
 		payload.ResponsesAgentContinuationSet = true
 	}
 	body, err := buildKiroResponsesBody(payload)

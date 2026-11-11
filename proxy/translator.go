@@ -1970,7 +1970,7 @@ func nextAgentContinuationID(conversationID, currentContent string, history []Ki
 		turnAnchor = "turn"
 	}
 	seed := conversationID + "\n" + turnAnchor
-	return deterministicUUIDv4(seed)
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)).String()
 }
 
 func deterministicUUIDv4(seed string) string {

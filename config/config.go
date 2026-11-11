@@ -43,28 +43,24 @@ func GenerateMachineId() string {
 		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
 }
 
-// NormalizeMachineId converts an explicit UUID/hex override to the
-// 64-character device identifier used by the official Kiro client.
+// NormalizeMachineId keeps 64 hex characters or repeats a UUID's 32 hex characters.
 func NormalizeMachineId(machineID string) string {
 	trimmed := strings.TrimSpace(machineID)
 	if len(trimmed) == 64 {
 		if _, err := hex.DecodeString(trimmed); err == nil {
-			return strings.ToLower(trimmed)
+			return trimmed
 		}
 	}
 	compact := strings.ReplaceAll(trimmed, "-", "")
 	if len(compact) == 32 {
 		if _, err := hex.DecodeString(compact); err == nil {
-			compact = strings.ToLower(compact)
 			return compact + compact
 		}
 	}
 	return ""
 }
 
-// MachineIdForCredentials derives a stable client fingerprint from the
-// credential itself. This is the same shape used by official OAuth and API-key
-// clients and prevents a new machine id from being generated on every import.
+// MachineIdForCredentials derives a device identity from the current credential.
 func MachineIdForCredentials(refreshToken, apiKey string) string {
 	if key := strings.TrimSpace(apiKey); strings.HasPrefix(key, "ksk_") && len(key) > len("ksk_") {
 		sum := sha256.Sum256([]byte("KiroAPIKey/" + key))
@@ -74,28 +70,21 @@ func MachineIdForCredentials(refreshToken, apiKey string) string {
 		sum := sha256.Sum256([]byte("KotlinNativeAPI/" + token))
 		return fmt.Sprintf("%x", sum[:])
 	}
-	return GenerateMachineId()
+	return ""
 }
 
-// EffectiveMachineId follows the current official client behavior. API keys
-// derive from the key, OAuth credentials derive from the current rotating
-// refresh token, and an explicitly edited id can be pinned by the operator.
+// EffectiveMachineId keeps explicit IDs and derives missing IDs from live credentials.
 func EffectiveMachineId(account *Account) string {
 	if account == nil {
 		return ""
 	}
-	if account.MachineIdLocked && strings.TrimSpace(account.MachineId) != "" {
-		if normalized := NormalizeMachineId(account.MachineId); normalized != "" {
-			return normalized
-		}
+	if machineID := NormalizeMachineId(account.MachineId); machineID != "" {
+		return machineID
 	}
 	if IsAPIKeyAccount(account) {
 		return MachineIdForCredentials("", account.KiroApiKey)
 	}
-	if token := strings.TrimSpace(account.RefreshToken); token != "" {
-		return MachineIdForCredentials(token, "")
-	}
-	return NormalizeMachineId(account.MachineId)
+	return MachineIdForCredentials(account.RefreshToken, "")
 }
 
 func KiroVersionForAccount(account *Account) string {
@@ -132,18 +121,17 @@ type Account struct {
 	// KiroApiKey is a headless Kiro API key (typically ksk_...). When set,
 	// AuthMethod is "api_key" and the key is used directly as the Bearer token
 	// without OAuth refresh. AccessToken is kept in sync for the shared request path.
-	KiroApiKey      string `json:"kiroApiKey,omitempty"`
-	ClientID        string `json:"clientId,omitempty"`        // OIDC client ID (for IdC auth)
-	ClientSecret    string `json:"clientSecret,omitempty"`    // OIDC client secret (for IdC auth)
-	AuthMethod      string `json:"authMethod"`                // Authentication method: "idc", "social", "external_idp", or "api_key"
-	Provider        string `json:"provider,omitempty"`        // Identity provider name (e.g., "BuilderId", "GitHub", "AzureAD")
-	Region          string `json:"region"`                    // AWS region for OIDC endpoints / API Key data plane
-	StartUrl        string `json:"startUrl,omitempty"`        // AWS SSO start URL
-	ExpiresAt       int64  `json:"expiresAt,omitempty"`       // Token expiration timestamp (Unix seconds); unused for API Key
-	MachineId       string `json:"machineId,omitempty"`       // Explicit or imported machine identifier
-	MachineIdLocked bool   `json:"machineIdLocked,omitempty"` // Explicit override; OAuth otherwise follows the current refresh token
-	KiroEndpoint    string `json:"kiroEndpoint,omitempty"`    // runtime, q-rest, q, or responses
-	ProfileArn      string `json:"profileArn,omitempty"`      // CodeWhisperer/Kiro profile ARN for generation requests
+	KiroApiKey   string `json:"kiroApiKey,omitempty"`
+	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
+	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
+	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc", "social", "external_idp", or "api_key"
+	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub", "AzureAD")
+	Region       string `json:"region"`                 // AWS region for OIDC endpoints / API Key data plane
+	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
+	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds); unused for API Key
+	MachineId    string `json:"machineId,omitempty"`    // Explicit or imported machine identifier
+	KiroEndpoint string `json:"kiroEndpoint,omitempty"` // runtime, q-rest, q, or responses
+	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
 
 	// Microsoft Enterprise SSO uses an external OAuth2 public client. These
 	// fields are deliberately separate from the AWS IdC client secret/region:
@@ -566,17 +554,10 @@ func validateKiroRegionHostLabel(region string) error {
 	return nil
 }
 
-// MachineIdFromAPIKey derives the machine id used by Kiro CLI/API-key clients:
-// sha256 hex of "KiroAPIKey/<api_key>".
-func MachineIdFromAPIKey(apiKey string) string {
-	sum := sha256.Sum256([]byte("KiroAPIKey/" + apiKey))
-	return fmt.Sprintf("%x", sum[:])
-}
-
 // NormalizeAPIKeyAccount fills API-key credential defaults in place.
 // It accepts "ksk_xxx|region", sets AuthMethod=api_key, copies the key into
 // AccessToken for the shared Bearer path, clears OAuth-only fields, and
-// derives MachineId when missing.
+// leaves MachineId empty when absent so requests derive it from the key.
 func NormalizeAPIKeyAccount(account *Account) error {
 	if account == nil {
 		return errors.New("account is nil")
@@ -611,9 +592,6 @@ func NormalizeAPIKeyAccount(account *Account) error {
 	}
 	if err := validateKiroRegionHostLabel(account.Region); err != nil {
 		return err
-	}
-	if strings.TrimSpace(account.MachineId) == "" {
-		account.MachineId = MachineIdFromAPIKey(key)
 	}
 	if strings.TrimSpace(account.Provider) == "" {
 		account.Provider = "APIKey"
@@ -696,9 +674,6 @@ func AddAccount(account Account) error {
 		}
 	} else if account.RefreshTokenFingerprint == "" {
 		account.RefreshTokenFingerprint = RefreshTokenFingerprint(account.RefreshToken)
-	}
-	if strings.TrimSpace(account.MachineId) == "" {
-		account.MachineId = MachineIdForCredentials(account.RefreshToken, account.KiroApiKey)
 	}
 	for _, existing := range cfg.Accounts {
 		if account.ID != "" && existing.ID == account.ID {
@@ -947,9 +922,6 @@ func UpdateAccountCredentialState(
 			cfg.Accounts[i].AccessToken = accessToken
 			if refreshToken != "" {
 				cfg.Accounts[i].RefreshToken = refreshToken
-				if !cfg.Accounts[i].MachineIdLocked {
-					cfg.Accounts[i].MachineId = MachineIdForCredentials(refreshToken, "")
-				}
 			}
 			cfg.Accounts[i].ExpiresAt = expiresAt
 			if profileArn != "" {
@@ -1420,7 +1392,6 @@ type KiroClientConfig struct {
 	KiroVersion      string
 	SystemVersion    string
 	NodeVersion      string
-	StreamingSDK     string
 	ResponsesVersion string
 	ResponsesNode    string
 }
@@ -1430,7 +1401,6 @@ func GetKiroClientConfig() KiroClientConfig {
 		KiroVersion:      "1.0.212",
 		SystemVersion:    defaultSystemVersion(),
 		NodeVersion:      "22.22.0",
-		StreamingSDK:     "1.0.34",
 		ResponsesVersion: "1.4.121",
 		ResponsesNode:    "24.22.1",
 	}

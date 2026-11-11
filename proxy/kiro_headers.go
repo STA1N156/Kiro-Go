@@ -10,6 +10,7 @@ import (
 const (
 	kiroCodeWhispererSDKVersion = "1.0.34"
 	kiroRuntimeSDKVersion       = "1.0.0"
+	kiroAgentServiceVersion     = "0.66.23"
 )
 
 type kiroHeaderValues struct {
@@ -19,16 +20,15 @@ type kiroHeaderValues struct {
 }
 
 func buildGenerateHeaderValues(account *config.Account, host string) kiroHeaderValues {
-	clientCfg := config.GetKiroClientConfig()
 	version := config.KiroVersionForAccount(account)
 	return buildKiroHeaderValues(
 		account,
 		host,
-		"codewhispererstreaming",
-		clientCfg.StreamingSDK,
-		"",
-		"KiroIDE",
+		"kiroruntime",
+		kiroCodeWhispererSDKVersion,
+		"m/N",
 		version,
+		true,
 	)
 }
 
@@ -39,17 +39,14 @@ func buildCodeWhispererHeaderValues(account *config.Account, host string) kiroHe
 		"codewhispererstreaming",
 		kiroCodeWhispererSDKVersion,
 		"m/E",
-		"KiroIDE",
 		config.KiroVersionForAccount(account),
+		false,
 	)
 }
 
-func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, mode, clientName, version string) kiroHeaderValues {
+func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, mode, version string, agent bool) kiroHeaderValues {
 	clientCfg := config.GetKiroClientConfig()
-	machineID := ""
-	if account != nil {
-		machineID = config.EffectiveMachineId(account)
-	}
+	machineID := config.EffectiveMachineId(account)
 
 	userAgent := fmt.Sprintf(
 		"aws-sdk-js/%s ua/2.1 os/%s lang/js md/nodejs#%s api/%s#%s",
@@ -62,18 +59,15 @@ func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, m
 	if mode != "" {
 		userAgent += " " + mode
 	}
-	amzIdentity := clientName
-	if strings.HasPrefix(clientName, "KiroIDE") {
-		identity := clientName + "-" + version
-		if machineID != "" {
-			identity += "-" + machineID
-		}
-		userAgent += " " + identity
-		amzIdentity = identity
-	} else {
-		userAgent += " " + clientName
+	identity := "KiroIDE-" + version
+	if machineID != "" {
+		identity += "-" + machineID
 	}
-	amzUserAgent := fmt.Sprintf("aws-sdk-js/%s %s", sdkVersion, amzIdentity)
+	if agent {
+		identity += "-KAS/" + kiroAgentServiceVersion
+	}
+	userAgent += " " + identity
+	amzUserAgent := fmt.Sprintf("aws-sdk-js/%s %s", sdkVersion, identity)
 
 	return kiroHeaderValues{
 		UserAgent:    userAgent,
@@ -135,7 +129,7 @@ func applyKiroResponsesHeaders(req *http.Request, account *config.Account, profi
 	machineID := config.EffectiveMachineId(account)
 	req.Header.Set(
 		"User-Agent",
-		fmt.Sprintf("KiroIDE %s %s KAS/0.66.89 acp-client/kiro-ide", clientCfg.ResponsesVersion, machineID),
+		fmt.Sprintf("KiroIDE %s %s KAS/%s acp-client/kiro-ide", clientCfg.ResponsesVersion, machineID, kiroAgentServiceVersion),
 	)
 	req.Header.Set("x-amzn-kiro-attempt", "1;max=3")
 	req.Header.Set("x-amzn-kiro-fallback", "0;max=0")

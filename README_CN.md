@@ -33,7 +33,7 @@
 - 多种认证方式：AWS Builder ID、IAM Identity Center (企业 SSO)、Microsoft 企业 SSO、SSO Token、本地缓存、凭证 JSON、Kiro API Key
 - 用量追踪、账号导入导出、中英越三语
 - 支持设置出站代理（SOCKS5 / HTTP）
-- 账号级设备指纹与出口代理，指纹跟随当前凭据，客户端版本、端点、报文形态和请求头成套匹配
+- 账号级设备指纹与出口代理，显式设备 ID 持续沿用，未提供时按当前 Refresh Token 或 API Key 派生，客户端版本、端点、报文形态和请求头成套匹配
 - 图片按上游限制压缩并校正真实 MIME，复杂或超长工具 Schema 自动安全降级，工具参数双编码自动修复
 
 ## 快速开始

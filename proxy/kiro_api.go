@@ -172,7 +172,7 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-		applyKiroManagementHeaders(req, account, "kirocontrolplanebearer", "1")
+		applyKiroManagementHeaders(req, account, "kirocontrolplanebearer", "1", true)
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -475,7 +475,7 @@ func listKiroProfilesInRegionContext(
 		if err != nil {
 			return nil, err
 		}
-		applyKiroManagementHeaders(req, account, "codewhispererruntime", "1")
+		applyKiroManagementHeaders(req, account, "codewhispererruntime", "1", false)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 

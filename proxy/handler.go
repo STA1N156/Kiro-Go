@@ -2582,7 +2582,6 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"expiresAt":         a.ExpiresAt,
 			"hasToken":          accountBearerToken(&a) != "",
 			"machineId":         a.MachineId,
-			"machineIdLocked":   a.MachineIdLocked,
 			"kiroEndpoint":      a.KiroEndpoint,
 			"weight":            a.Weight,
 			"overageStatus":     a.OverageStatus,
@@ -2703,7 +2702,6 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["machineId"].(string); ok {
 		existing.MachineId = v
-		existing.MachineIdLocked = strings.TrimSpace(v) != ""
 	}
 	if v, ok := updates["kiroEndpoint"].(string); ok {
 		switch endpoint := strings.ToLower(strings.TrimSpace(v)); endpoint {
@@ -3004,7 +3002,6 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		Region:       region,
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		Enabled:      true,
-		MachineId:    config.MachineIdForCredentials(refreshToken, ""),
 		ProxyURL:     proxyURL,
 	}
 
@@ -3100,7 +3097,6 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 		Region:        "us-east-1",
 		ExpiresAt:     result.ExpiresAt,
 		Enabled:       true,
-		MachineId:     config.MachineIdForCredentials(result.RefreshToken, ""),
 		TokenEndpoint: result.TokenEndpoint,
 		IssuerURL:     result.IssuerURL,
 		Scopes:        result.Scopes,
@@ -3611,7 +3607,6 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		Region:       region,
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		Enabled:      true,
-		MachineId:    config.MachineIdForCredentials(refreshToken, ""),
 		ProxyURL:     proxyURL,
 	}
 
@@ -3686,7 +3681,6 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 			Region:       req.Region,
 			ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 			Enabled:      true,
-			MachineId:    config.MachineIdForCredentials(refreshToken, ""),
 			ProxyURL:     proxyURL,
 		}
 
@@ -3804,18 +3798,17 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			accountID = auth.GenerateAccountID()
 		}
 		account := config.Account{
-			ID:              accountID,
-			Email:           strings.TrimSpace(req.Email),
-			UserId:          strings.TrimSpace(req.UserID),
-			Nickname:        strings.TrimSpace(req.Nickname),
-			KiroApiKey:      req.KiroApiKey,
-			AuthMethod:      "api_key",
-			Provider:        strings.TrimSpace(req.Provider),
-			Region:          strings.TrimSpace(req.Region),
-			ProxyURL:        proxyURL,
-			MachineId:       explicitMachineID,
-			MachineIdLocked: explicitMachineID != "",
-			Enabled:         true,
+			ID:         accountID,
+			Email:      strings.TrimSpace(req.Email),
+			UserId:     strings.TrimSpace(req.UserID),
+			Nickname:   strings.TrimSpace(req.Nickname),
+			KiroApiKey: req.KiroApiKey,
+			AuthMethod: "api_key",
+			Provider:   strings.TrimSpace(req.Provider),
+			Region:     strings.TrimSpace(req.Region),
+			ProxyURL:   proxyURL,
+			MachineId:  explicitMachineID,
+			Enabled:    true,
 		}
 		if err := config.NormalizeAPIKeyAccount(&account); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -3962,17 +3955,16 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tempAccount := &config.Account{
-		RefreshToken:    req.RefreshToken,
-		ClientID:        req.ClientID,
-		ClientSecret:    req.ClientSecret,
-		AuthMethod:      req.AuthMethod,
-		Region:          req.Region,
-		TokenEndpoint:   req.TokenEndpoint,
-		IssuerURL:       req.IssuerURL,
-		Scopes:          req.Scopes,
-		ProxyURL:        proxyURL,
-		MachineId:       explicitMachineID,
-		MachineIdLocked: explicitMachineID != "",
+		RefreshToken:  req.RefreshToken,
+		ClientID:      req.ClientID,
+		ClientSecret:  req.ClientSecret,
+		AuthMethod:    req.AuthMethod,
+		Region:        req.Region,
+		TokenEndpoint: req.TokenEndpoint,
+		IssuerURL:     req.IssuerURL,
+		Scopes:        req.Scopes,
+		ProxyURL:      proxyURL,
+		MachineId:     explicitMachineID,
 	}
 	accessToken, newRefreshToken, expiresAt, newProfileArn, err := auth.RefreshToken(tempAccount)
 	if err != nil {
@@ -4050,6 +4042,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		AccessToken:             accessToken,
 		RefreshToken:            req.RefreshToken,
 		RefreshTokenFingerprint: config.RefreshTokenFingerprint(originalRefreshToken),
+		MachineId:               explicitMachineID,
 		ClientID:                req.ClientID,
 		ClientSecret:            req.ClientSecret,
 		AuthMethod:              req.AuthMethod,
@@ -4057,8 +4050,6 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		Region:                  req.Region,
 		ExpiresAt:               expiresAt,
 		Enabled:                 true,
-		MachineId:               explicitMachineID,
-		MachineIdLocked:         explicitMachineID != "",
 		ProfileArn:              profileARN,
 		TokenEndpoint:           req.TokenEndpoint,
 		IssuerURL:               req.IssuerURL,
@@ -4481,7 +4472,6 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"scopes":            account.Scopes,
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
-		"machineIdLocked":   account.MachineIdLocked,
 		"kiroEndpoint":      account.KiroEndpoint,
 		"weight":            account.Weight,
 		"overageStatus":     account.OverageStatus,

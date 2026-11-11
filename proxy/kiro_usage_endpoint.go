@@ -36,29 +36,14 @@ func applyKiroUsageHeaders(req *http.Request, account *kiroconfig.Account) {
 		service = "codewhispererruntime"
 		maxAttempts = "3"
 	}
-	applyKiroManagementHeaders(req, account, service, maxAttempts)
+	applyKiroManagementHeaders(req, account, service, maxAttempts, false)
 }
 
-func applyKiroManagementHeaders(req *http.Request, account *kiroconfig.Account, service, maxAttempts string) {
-	clientCfg := kiroconfig.GetKiroClientConfig()
+func applyKiroManagementHeaders(req *http.Request, account *kiroconfig.Account, service, maxAttempts string, agent bool) {
 	version := kiroconfig.KiroVersionForAccount(account)
-	node := kiroconfig.KiroNodeVersionForAccount(account)
-	machine := kiroconfig.EffectiveMachineId(account)
-	identity := "KiroIDE-" + version
-	if machine != "" {
-		identity += "-" + machine
-	}
-	req.Header.Set("X-Amz-User-Agent", "aws-sdk-js/1.0.0 "+identity)
-	req.Header.Set(
-		"User-Agent",
-		fmt.Sprintf(
-			"aws-sdk-js/1.0.0 ua/2.1 os/%s lang/js md/nodejs#%s api/%s#1.0.0 m/N,E %s",
-			clientCfg.SystemVersion,
-			node,
-			service,
-			identity,
-		),
-	)
+	values := buildKiroHeaderValues(account, "", service, kiroRuntimeSDKVersion, "m/N,E", version, agent)
+	req.Header.Set("X-Amz-User-Agent", values.AmzUserAgent)
+	req.Header.Set("User-Agent", values.UserAgent)
 	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.NewString())
 	req.Header.Set("Amz-Sdk-Request", "attempt=1; max="+maxAttempts)
 	req.Header.Set("Connection", "close")
