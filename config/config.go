@@ -186,10 +186,7 @@ type Config struct {
 	ApiKey                  string          `json:"apiKey,omitempty"`  // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
 	RequireApiKey           bool            `json:"requireApiKey"`     // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
 	ApiKeys                 []ApiKeyEntry   `json:"apiKeys,omitempty"` // Multiple API keys, each with independent quota
-	KiroVersion             string          `json:"kiroVersion,omitempty"`
-	SystemVersion           string          `json:"systemVersion,omitempty"`
-	NodeVersion             string          `json:"nodeVersion,omitempty"`
-	Accounts                []Account       `json:"accounts"` // Registered Kiro accounts
+	Accounts                []Account       `json:"accounts"`          // Registered Kiro accounts
 	ModelCooldowns          []ModelCooldown `json:"modelCooldowns,omitempty"`
 	ModelCooldownSeconds    int             `json:"modelCooldownSeconds"`
 	MaxAccountRetryAttempts int             `json:"maxAccountRetryAttempts,omitempty"`
@@ -198,13 +195,6 @@ type Config struct {
 	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
 	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
 	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
-
-	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
-	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
-
-	// EndpointFallback controls whether to try other endpoints when the preferred one fails.
-	// Defaults to true. Set to false to only use the preferred endpoint.
-	EndpointFallback *bool `json:"endpointFallback,omitempty"`
 
 	// AllowOverUsage allows accounts to continue serving requests even when their
 	// usage quota has been exhausted. When enabled, the pool will not skip accounts
@@ -1162,42 +1152,6 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
 	return Save()
 }
 
-// GetPreferredEndpoint 获取首选端点配置
-func GetPreferredEndpoint() string {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	if cfg.PreferredEndpoint == "" {
-		return "auto"
-	}
-	return cfg.PreferredEndpoint
-}
-
-// UpdatePreferredEndpoint 更新首选端点配置
-func UpdatePreferredEndpoint(endpoint string) error {
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	cfg.PreferredEndpoint = endpoint
-	return Save()
-}
-
-// GetEndpointFallback returns whether endpoint fallback is enabled. Defaults to true.
-func GetEndpointFallback() bool {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	if cfg.EndpointFallback == nil {
-		return true
-	}
-	return *cfg.EndpointFallback
-}
-
-// UpdateEndpointFallback sets the endpoint fallback switch and persists the change.
-func UpdateEndpointFallback(enabled bool) error {
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	cfg.EndpointFallback = &enabled
-	return Save()
-}
-
 // GetProxyURL 获取出站代理地址
 func GetProxyURL() string {
 	cfgLock.RLock()
@@ -1256,31 +1210,10 @@ type KiroClientConfig struct {
 }
 
 func GetKiroClientConfig() KiroClientConfig {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-
-	kiroVersion := "0.11.107"
-	if cfg != nil && cfg.KiroVersion != "" {
-		kiroVersion = cfg.KiroVersion
-	}
-
-	systemVersion := ""
-	if cfg != nil {
-		systemVersion = cfg.SystemVersion
-	}
-	if systemVersion == "" {
-		systemVersion = defaultSystemVersion()
-	}
-
-	nodeVersion := "22.22.0"
-	if cfg != nil && cfg.NodeVersion != "" {
-		nodeVersion = cfg.NodeVersion
-	}
-
 	return KiroClientConfig{
-		KiroVersion:   kiroVersion,
-		SystemVersion: systemVersion,
-		NodeVersion:   nodeVersion,
+		KiroVersion:   "1.4.154",
+		SystemVersion: defaultSystemVersion(),
+		NodeVersion:   "22.22.2",
 	}
 }
 

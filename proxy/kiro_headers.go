@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	kiroStreamingSDKVersion = "1.0.34"
-	kiroRuntimeSDKVersion   = "1.0.0"
+	kiroGenerateSDKVersion      = "1.0.0"
+	kiroRuntimeSDKVersion       = "1.0.0"
+	kiroCodeWhispererSDKVersion = "1.0.34"
 )
 
 type kiroHeaderValues struct {
@@ -18,8 +19,19 @@ type kiroHeaderValues struct {
 	Host         string
 }
 
-func buildStreamingHeaderValues(account *config.Account, host string) kiroHeaderValues {
-	return buildKiroHeaderValues(account, host, "codewhispererstreaming", kiroStreamingSDKVersion, "m/E")
+func buildGenerateHeaderValues(account *config.Account, host string) kiroHeaderValues {
+	return buildKiroHeaderValues(account, host, "kiroruntime", kiroGenerateSDKVersion, "m/N")
+}
+
+func buildAgentHeaderValues(account *config.Account, host string) kiroHeaderValues {
+	values := buildKiroHeaderValues(account, host, "kiroruntime", kiroGenerateSDKVersion, "m/N")
+	values.UserAgent = strings.Replace(values.UserAgent, " KiroIDE-"+config.GetKiroClientConfig().KiroVersion, " KiroAgent-0.1.0", 1)
+	values.AmzUserAgent = "aws-sdk-js/" + kiroGenerateSDKVersion + " KiroAgent-0.1.0"
+	return values
+}
+
+func buildCodeWhispererHeaderValues(account *config.Account, host string) kiroHeaderValues {
+	return buildKiroHeaderValues(account, host, "codewhispererstreaming", kiroCodeWhispererSDKVersion, "m/E")
 }
 
 func buildRuntimeHeaderValues(account *config.Account, host string) kiroHeaderValues {

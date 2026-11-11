@@ -282,7 +282,7 @@ func callMcpAPI(ctx context.Context, account *config.Account, mcpReq *McpRequest
 	if parsed, perr := url.Parse(endpoint); perr == nil {
 		host = parsed.Host
 	}
-	headerValues := buildStreamingHeaderValues(account, host)
+	headerValues := buildCodeWhispererHeaderValues(account, host)
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "*/*")

@@ -975,8 +975,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		var nextContentIndex int
 		var rawContentBuilder strings.Builder
 		var rawThinkingBuilder strings.Builder
+		var thinkingSignature string
+		var upstreamStopReason string
 		activeBlockIndex := -1
 		activeBlockType := ""
+		signatureSent := false
 
 		closeActiveBlock := func() {
 			if activeBlockIndex < 0 {
@@ -1096,6 +1099,18 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			}
 		}
 
+		sendThinkingSignature := func() {
+			if thinkingSignature == "" || signatureSent || activeBlockType != "thinking" {
+				return
+			}
+			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": activeBlockIndex,
+				"delta": map[string]string{"type": "signature_delta", "signature": thinkingSignature},
+			})
+			signatureSent = true
+		}
+
 		processClaudeText := func(text string, isThinking bool, forceFlush bool) {
 			if isThinking {
 				thinkingSource = thinkingSourceReasoningEvent
@@ -1110,6 +1125,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			}
 
 			if eventThinkingOpen {
+				sendThinkingSignature()
 				sendText("", 3)
 				eventThinkingOpen = false
 				thinkingStarted = false
@@ -1199,6 +1215,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				}
 				processClaudeText(text, isThinking, false)
 			},
+			OnReasoningSignature: func(signature string) {
+				thinkingSignature = signature
+				sendThinkingSignature()
+			},
 			OnToolUse: func(tu KiroToolUse) {
 				processClaudeText("", false, true)
 				rawContentBuilder.WriteString(tu.Name)
@@ -1249,6 +1269,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 			},
+			OnStopReason: func(reason string) {
+				upstreamStopReason = reason
+			},
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
@@ -1277,8 +1300,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 		processClaudeText("", false, true)
 		if eventThinkingOpen {
+			sendThinkingSignature()
 			sendText("", 3)
 		}
+		sendThinkingSignature()
 		closeActiveBlock()
 
 		if realInputTokens > 0 {
@@ -1299,10 +1324,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		cacheUsage := h.promptCache.finish(cacheProfile, inputTokens)
 		h.recordSuccessLog("claude", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		stopReason := "end_turn"
-		if len(toolUses) > 0 {
-			stopReason = "tool_use"
-		}
+		stopReason := claudeStopReason(upstreamStopReason, len(toolUses) > 0)
 
 		ensureMessageStart()
 		h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
@@ -1523,6 +1545,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		var content, thinkingContent strings.Builder
+		var thinkingSignature string
+		var upstreamStopReason string
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
 		var credits float64
@@ -1548,6 +1572,12 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+			},
+			OnReasoningSignature: func(signature string) {
+				thinkingSignature = signature
+			},
+			OnStopReason: func(reason string) {
+				upstreamStopReason = reason
 			},
 		}
 
@@ -1600,7 +1630,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			}
 		}
 
-		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, false, toolUses, inputTokens, outputTokens, model)
+		resp := KiroToClaudeResponse(
+			finalContent, responseThinkingContent, thinkingSignature, upstreamStopReason,
+			false, toolUses, inputTokens, outputTokens, model,
+		)
 		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 		resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1719,6 +1752,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
+		var upstreamStopReason string
 		var rawContentBuilder strings.Builder
 		var rawReasoningBuilder strings.Builder
 		var textBuffer string
@@ -1975,6 +2009,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 			},
+			OnStopReason: func(reason string) {
+				upstreamStopReason = reason
+			},
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
@@ -2027,10 +2064,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("openai", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		finishReason := "stop"
-		if len(toolCalls) > 0 {
-			finishReason = "tool_calls"
-		}
+		finishReason := openAIFinishReason(upstreamStopReason, len(toolCalls) > 0)
 
 		chunk := map[string]interface{}{
 			"id":      chatID,
@@ -2091,6 +2125,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
+		var upstreamStopReason string
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
@@ -2105,6 +2140,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			OnCredits:  func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+			},
+			OnStopReason: func(reason string) {
+				upstreamStopReason = reason
 			},
 		}
 
@@ -2143,7 +2181,10 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		h.recordSuccessLog("openai", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
-		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
+		resp := KiroToOpenAIResponseWithReasoning(
+			finalContent, reasoningContent, upstreamStopReason,
+			toolUses, inputTokens, outputTokens, model, thinkingFormat,
+		)
 		resp["usage"] = h.promptCache.openAIUsage(cacheProfile, inputTokens, outputTokens)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(resp)
@@ -2403,10 +2444,6 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetThinkingConfig(w, r)
 	case path == "/thinking" && r.Method == "POST":
 		h.apiUpdateThinkingConfig(w, r)
-	case path == "/endpoint" && r.Method == "GET":
-		h.apiGetEndpointConfig(w, r)
-	case path == "/endpoint" && r.Method == "POST":
-		h.apiUpdateEndpointConfig(w, r)
 	case path == "/proxy" && r.Method == "GET":
 		h.apiGetProxy(w, r)
 	case path == "/proxy" && r.Method == "POST":
@@ -4432,46 +4469,6 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
-	}
-
-	json.NewEncoder(w).Encode(map[string]bool{"success": true})
-}
-
-// apiGetEndpointConfig 获取端点配置
-func (h *Handler) apiGetEndpointConfig(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"preferredEndpoint": config.GetPreferredEndpoint(),
-		"endpointFallback":  config.GetEndpointFallback(),
-	})
-}
-
-// apiUpdateEndpointConfig 更新端点配置
-func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		PreferredEndpoint string `json:"preferredEndpoint"`
-		EndpointFallback  *bool  `json:"endpointFallback"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
-		return
-	}
-
-	valid := map[string]bool{"auto": true, "kiro": true, "codewhisperer": true, "amazonq": true}
-	if !valid[req.PreferredEndpoint] {
-		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid endpoint, must be: auto, kiro, codewhisperer, or amazonq"})
-		return
-	}
-
-	if err := config.UpdatePreferredEndpoint(req.PreferredEndpoint); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-
-	if req.EndpointFallback != nil {
-		config.UpdateEndpointFallback(*req.EndpointFallback)
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})

@@ -1633,7 +1633,7 @@
     $('localCacheMaxHitPercent').value = d.localCache?.maxHitPercent ?? 90;
     $('modelCooldownSeconds').value = d.modelCooldownSeconds ?? 60;
     $('maxAccountRetryAttempts').value = d.maxAccountRetryAttempts ?? 7;
-    await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
+    await Promise.all([loadThinkingConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
   async function saveLocalCacheConfig() {
@@ -1680,23 +1680,6 @@
     });
     const d = await res.json();
     if (d.success) toast(t('settings.thinkingSaved'), 'success');
-    else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
-  }
-  async function loadEndpointConfig() {
-    const res = await api('/endpoint');
-    const d = await res.json();
-    $('preferredEndpoint').value = d.preferredEndpoint || 'auto';
-    $('endpointFallback').checked = d.endpointFallback !== false;
-  }
-  async function saveEndpointConfig() {
-    const res = await api('/endpoint', {
-      method: 'POST', body: JSON.stringify({
-        preferredEndpoint: $('preferredEndpoint').value,
-        endpointFallback: $('endpointFallback').checked
-      })
-    });
-    const d = await res.json();
-    if (d.success) toast(t('settings.endpointSaved'), 'success');
     else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
   }
   async function loadProxyConfig() {
@@ -3357,7 +3340,6 @@
     $('saveOverUsageBtn').addEventListener('click', saveOverUsageConfig);
     $('saveLocalCacheBtn').addEventListener('click', saveLocalCacheConfig);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
-    $('saveEndpointBtn').addEventListener('click', saveEndpointConfig);
     $('changePasswordBtn').addEventListener('click', changePassword);
     $('proxyType').addEventListener('change', onProxyTypeChange);
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);

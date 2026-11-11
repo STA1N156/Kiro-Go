@@ -37,52 +37,20 @@ const (
 	// covers the observed transient drops without multiplying the existing
 	// endpoint and account fallback budgets more than necessary.
 	maxStreamAttemptsPerEndpoint = 2
+	kiroSDKMaxAttempts           = 3
 )
 
 var (
 	errEmptyKiroStream         = errors.New("该内容违反Anthropic相关条款限制，无法继续进行，可切换至非Opus5/5.5模型，详情参考https://support.claude.com/zh-CN/articles/16049681")
 	errIncompleteKiroToolInput = errors.New("upstream stream ended with incomplete tool input")
 	streamRetryWait            = waitForStreamRetry
-	resolveKiroEndpoints       = endpointsForAccount
 )
 
-// Endpoint configuration (auto-fallback on quota exhaustion).
-type kiroEndpoint struct {
-	URL       string
-	Origin    string
-	AmzTarget string
-	Name      string
-}
-
-var kiroEndpoints = []kiroEndpoint{
-	{
-		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "AI_EDITOR",
-		AmzTarget: "",
-		Name:      "Kiro IDE",
-	},
-	{
-		URL:       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "AI_EDITOR",
-		AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-		Name:      "CodeWhisperer",
-	},
-	{
-		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "AI_EDITOR",
-		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
-		Name:      "AmazonQ",
-	},
-}
-
-// kiroCLIEndpoint is the headless / API Key path used by Kiro CLI:
-// POST https://runtime.{region}.kiro.dev/ with AWS JSON 1.0 protocol.
-var kiroCLIEndpoint = kiroEndpoint{
-	URL:       "https://runtime.us-east-1.kiro.dev/",
-	Origin:    "KIRO_CLI",
-	AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-	Name:      "Kiro CLI",
-}
+const (
+	kiroRuntimeTarget         = "KiroRuntimeService.GenerateAssistantResponse"
+	kiroCodeWhispererTarget   = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
+	kiroCodeWhispererEndpoint = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
+)
 
 // Global HTTP clients, swappable at runtime to apply proxy reconfiguration without restart.
 var kiroHttpStore atomic.Pointer[http.Client]
@@ -146,13 +114,12 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  false,
-		ForceAttemptHTTP2:   true,
+		// The current Kiro clients use HTTP/1.1 for runtime requests.
+		ForceAttemptHTTP2: false,
 	}
 	if proxyURL != "" {
 		if u, err := url.Parse(proxyURL); err == nil {
 			t.Proxy = http.ProxyURL(u)
-			// Proxied connections cannot negotiate HTTP/2.
-			t.ForceAttemptHTTP2 = false
 		}
 	} else {
 		t.Proxy = http.ProxyFromEnvironment
@@ -180,16 +147,17 @@ func InitKiroHttpClient(proxyURL string) {
 // KiroPayload is the top-level request body sent to the Kiro API.
 type KiroPayload struct {
 	ConversationState struct {
-		AgentContinuationId string `json:"agentContinuationId,omitempty"`
-		AgentTaskType       string `json:"agentTaskType,omitempty"`
-		ChatTriggerType     string `json:"chatTriggerType"`
-		ConversationID      string `json:"conversationId"`
-		CurrentMessage      struct {
+		CurrentMessage struct {
 			UserInputMessage KiroUserInputMessage `json:"userInputMessage"`
 		} `json:"currentMessage"`
-		History []KiroHistoryMessage `json:"history,omitempty"`
+		ChatTriggerType     string               `json:"chatTriggerType"`
+		ConversationID      string               `json:"conversationId"`
+		History             []KiroHistoryMessage `json:"history,omitempty"`
+		AgentContinuationId string               `json:"agentContinuationId,omitempty"`
+		AgentTaskType       string               `json:"agentTaskType,omitempty"`
 	} `json:"conversationState"`
 	ProfileArn                   string                 `json:"profileArn,omitempty"`
+	AgentMode                    string                 `json:"agentMode,omitempty"`
 	InferenceConfig              *InferenceConfig       `json:"inferenceConfig,omitempty"`
 	AdditionalModelRequestFields map[string]interface{} `json:"additionalModelRequestFields,omitempty"`
 
@@ -202,22 +170,22 @@ type KiroPayload struct {
 
 type KiroUserInputMessage struct {
 	Content                 string                   `json:"content"`
-	ModelID                 string                   `json:"modelId,omitempty"`
+	UserInputMessageContext *UserInputMessageContext `json:"userInputMessageContext,omitempty"`
 	Origin                  string                   `json:"origin"`
 	Images                  []KiroImage              `json:"images,omitempty"`
-	UserInputMessageContext *UserInputMessageContext `json:"userInputMessageContext,omitempty"`
+	ModelID                 string                   `json:"modelId,omitempty"`
 }
 
 type UserInputMessageContext struct {
-	Tools       []KiroToolWrapper `json:"tools,omitempty"`
 	ToolResults []KiroToolResult  `json:"toolResults,omitempty"`
+	Tools       []KiroToolWrapper `json:"tools,omitempty"`
 }
 
 type KiroToolWrapper struct {
 	ToolSpecification struct {
+		InputSchema InputSchema `json:"inputSchema"`
 		Name        string      `json:"name"`
 		Description string      `json:"description"`
-		InputSchema InputSchema `json:"inputSchema"`
 	} `json:"toolSpecification"`
 }
 
@@ -248,8 +216,19 @@ type KiroHistoryMessage struct {
 }
 
 type KiroAssistantResponseMessage struct {
-	Content  string        `json:"content"`
-	ToolUses []KiroToolUse `json:"toolUses,omitempty"`
+	Content          string         `json:"content"`
+	ToolUses         []KiroToolUse  `json:"toolUses,omitempty"`
+	ReasoningContent *KiroReasoning `json:"reasoningContent,omitempty"`
+}
+
+type KiroReasoning struct {
+	ReasoningText   *KiroReasoningText `json:"reasoningText,omitempty"`
+	RedactedContent string             `json:"redactedContent,omitempty"`
+}
+
+type KiroReasoningText struct {
+	Text      string `json:"text"`
+	Signature string `json:"signature,omitempty"`
 }
 
 type KiroToolUse struct {
@@ -268,12 +247,14 @@ type InferenceConfig struct {
 
 // KiroStreamCallback stream response callbacks
 type KiroStreamCallback struct {
-	OnText         func(text string, isThinking bool)
-	OnToolUse      func(toolUse KiroToolUse)
-	OnComplete     func(inputTokens, outputTokens int)
-	OnError        func(err error)
-	OnCredits      func(credits float64)
-	OnContextUsage func(percentage float64)
+	OnText               func(text string, isThinking bool)
+	OnReasoningSignature func(signature string)
+	OnToolUse            func(toolUse KiroToolUse)
+	OnStopReason         func(reason string)
+	OnComplete           func(inputTokens, outputTokens int)
+	OnError              func(err error)
+	OnCredits            func(credits float64)
+	OnContextUsage       func(percentage float64)
 }
 
 // ==================== API Call ====================
@@ -297,57 +278,17 @@ func setPayloadProfileArnForAccount(payload *KiroPayload, account *config.Accoun
 	}
 }
 
-// endpointsForAccount returns the upstream endpoint list for a credential.
-// API Key accounts always use the CLI runtime protocol; OAuth accounts keep
-// the configured preferred-endpoint fallback chain.
-func endpointsForAccount(account *config.Account) []kiroEndpoint {
-	if config.IsAPIKeyAccount(account) {
-		return []kiroEndpoint{kiroCLIEndpoint}
+func setPayloadOrigin(payload *KiroPayload, origin string) {
+	if payload == nil {
+		return
 	}
-	return getSortedEndpoints(config.GetPreferredEndpoint())
-}
 
-// cliRuntimeURL builds the regional Kiro CLI runtime URL.
-func cliRuntimeURL(account *config.Account) string {
-	region := "us-east-1"
-	if account != nil {
-		if r := strings.TrimSpace(account.Region); r != "" {
-			region = r
+	payload.ConversationState.CurrentMessage.UserInputMessage.Origin = origin
+	for i := range payload.ConversationState.History {
+		if payload.ConversationState.History[i].UserInputMessage != nil {
+			payload.ConversationState.History[i].UserInputMessage.Origin = origin
 		}
 	}
-	return fmt.Sprintf("https://runtime.%s.kiro.dev/", region)
-}
-
-// getSortedEndpoints returns endpoints ordered by user preference, with optional fallback.
-func getSortedEndpoints(preferred string) []kiroEndpoint {
-	fallback := config.GetEndpointFallback()
-
-	var primary int
-	switch preferred {
-	case "kiro":
-		primary = 0
-	case "codewhisperer":
-		primary = 1
-	case "amazonq":
-		primary = 2
-	default:
-		// "auto": Kiro first, then fallback to others
-		return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1], kiroEndpoints[2]}
-	}
-
-	if !fallback {
-		// No fallback: only use the selected endpoint
-		return []kiroEndpoint{kiroEndpoints[primary]}
-	}
-
-	// With fallback: selected first, then others in order
-	result := []kiroEndpoint{kiroEndpoints[primary]}
-	for i, ep := range kiroEndpoints {
-		if i != primary {
-			result = append(result, ep)
-		}
-	}
-	return result
 }
 
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
@@ -403,97 +344,63 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 		}
 	}
 
-	// Build endpoint list ordered by configuration / credential type.
-	endpoints := resolveKiroEndpoints(account)
+	requestConfig := resolveKiroRequestConfig(account, payload.ProfileArn)
 	isAPIKey := config.IsAPIKeyAccount(account)
+	setPayloadOrigin(payload, requestConfig.Origin)
 
 	var lastErr error
 	var reqBody []byte
-	var bodyOrigin string
-endpointLoop:
-	for epIndex, ep := range endpoints {
-		if err := ctx.Err(); err != nil {
+	reqBody, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if logger.GetLevel() == logger.LevelDebug {
+		logger.Debugf("[KiroAPI] Request payload: %s", reqBody)
+	}
+	host := ""
+	if parsedURL, parseErr := url.Parse(requestConfig.URL); parseErr == nil {
+		host = parsedURL.Host
+	}
+	headerValues := requestConfig.HeaderValues(account, host)
+	invocationID := uuid.New().String()
+
+	for streamAttempt := 1; streamAttempt <= maxStreamAttemptsPerEndpoint; streamAttempt++ {
+		// Each attempt gets a fresh reader over the reusable payload bytes.
+		req, err := http.NewRequestWithContext(ctx, "POST", requestConfig.URL, bytes.NewReader(reqBody))
+		if err != nil {
 			return err
 		}
-		// Update the origin field for the selected endpoint.
-		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
 
-		// Target the profile's data-plane region; endpoint URLs are declared for us-east-1.
-		// API Key accounts use the CLI runtime host instead of IDE/Q hosts.
-		epURL := regionalizeURLForProfile(ep.URL, account, payload.ProfileArn)
-		if isAPIKey {
-			epURL = cliRuntimeURL(account)
+		req.Header.Set("Content-Type", requestConfig.ContentType)
+		req.Header.Set("Accept", "*/*")
+		if requestConfig.AmzTarget != "" {
+			req.Header.Set("X-Amz-Target", requestConfig.AmzTarget)
 		}
+		applyKiroBaseHeaders(req, account, headerValues)
+		if isAPIKey {
+			req.Header.Set("x-amzn-codewhisperer-optout", "false")
+		} else {
+			req.Header.Set("x-amzn-codewhisperer-optout", "true")
+		}
+		req.Header.Set("Amz-Sdk-Request", fmt.Sprintf("attempt=%d; max=%d", streamAttempt, kiroSDKMaxAttempts))
+		req.Header.Set("Amz-Sdk-Invocation-Id", invocationID)
 
-		if reqBody == nil || bodyOrigin != ep.Origin {
-			var err error
-			reqBody, err = json.Marshal(payload)
-			if err != nil {
+		resp, err := GetClientForProxy(ResolveAccountProxyURL(account)).Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			lastErr = err
+			logger.Warnf("[KiroAPI] Kiro Runtime failed: %v", err)
+			if !isRetryableStreamError(err) {
 				return err
 			}
-			bodyOrigin = ep.Origin
-			if logger.GetLevel() == logger.LevelDebug {
-				logger.Debugf("[KiroAPI] Request payload: %s", reqBody)
-			}
-		}
-		host := ""
-		if parsedURL, parseErr := url.Parse(epURL); parseErr == nil {
-			host = parsedURL.Host
-		}
-		headerValues := buildStreamingHeaderValues(account, host)
-		invocationID := uuid.New().String()
-
-		for streamAttempt := 1; streamAttempt <= maxStreamAttemptsPerEndpoint; streamAttempt++ {
-			// Each attempt gets a fresh reader over the reusable payload bytes.
-			req, err := http.NewRequestWithContext(ctx, "POST", epURL, bytes.NewReader(reqBody))
-			if err != nil {
-				lastErr = err
-				continue endpointLoop
-			}
-
-			if isAPIKey {
-				req.Header.Set("Content-Type", "application/x-amz-json-1.0")
-			} else {
-				req.Header.Set("Content-Type", "application/json")
-			}
-			req.Header.Set("Accept", "*/*")
-			if ep.AmzTarget != "" {
-				req.Header.Set("X-Amz-Target", ep.AmzTarget)
-			}
-			applyKiroBaseHeaders(req, account, headerValues)
-			if !isAPIKey {
-				req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
-			}
-			// CLI captures use optout=false; IDE path keeps true.
-			if isAPIKey {
-				req.Header.Set("x-amzn-codewhisperer-optout", "false")
-			} else {
-				req.Header.Set("x-amzn-codewhisperer-optout", "true")
-			}
-			req.Header.Set("Amz-Sdk-Request", fmt.Sprintf("attempt=%d; max=%d", streamAttempt, maxStreamAttemptsPerEndpoint))
-			req.Header.Set("Amz-Sdk-Invocation-Id", invocationID)
-
-			resp, err := GetClientForProxy(ResolveAccountProxyURL(account)).Do(req)
-			if err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				lastErr = err
-				logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
-				if !isRetryableStreamError(err) {
-					return err
-				}
-				continue endpointLoop
-			}
+		} else {
 
 			if resp.StatusCode == 429 {
 				resp.Body.Close()
-				logger.Warnf("[KiroAPI] Endpoint %s quota exhausted (429), trying next...", ep.Name)
-				lastErr = fmt.Errorf("quota exhausted on %s", ep.Name)
-				continue endpointLoop
-			}
-
-			if resp.StatusCode != 200 {
+				lastErr = fmt.Errorf("quota exhausted on Kiro Runtime")
+			} else if resp.StatusCode != 200 {
 				errBody, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				if ctx.Err() != nil {
@@ -502,57 +409,41 @@ endpointLoop:
 				if (resp.StatusCode == 400 || resp.StatusCode == 413) && isContextLengthError(string(errBody)) {
 					return errContextTooLong
 				}
-				lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, ep.Name, string(errBody))
-				// Authentication errors and payment errors are not retried across endpoints.
+				lastErr = fmt.Errorf("HTTP %d from Kiro Runtime: %s", resp.StatusCode, string(errBody))
 				if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
 					return lastErr
 				}
-				logger.Warnf("[KiroAPI] Endpoint %s error: %v", ep.Name, lastErr)
-				continue endpointLoop
+				logger.Warnf("[KiroAPI] Kiro Runtime error: %v", lastErr)
+			} else {
+				emitted, streamErr := parseEventStreamTracked(resp.Body, callback)
+				resp.Body.Close()
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if streamErr == nil {
+					return nil
+				}
+				lastErr = streamErr
+				if errors.Is(streamErr, errEmptyKiroStream) {
+					return streamErr
+				}
+				if emitted || errors.Is(streamErr, errContextTooLong) {
+					return streamErr
+				}
+				var kiroErr *kiroStreamError
+				if errors.As(streamErr, &kiroErr) || !isRetryableStreamError(streamErr) {
+					return streamErr
+				}
 			}
+		}
 
-			emitted, err := parseEventStreamTracked(resp.Body, callback)
-			resp.Body.Close()
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if err == nil {
-				return nil
-			}
-			lastErr = err
-			// Empty output cools down this account/model; do not retry it here.
-			if errors.Is(err, errEmptyKiroStream) {
-				return err
-			}
-			// "Emitted" deliberately means that an output callback ran. This
-			// conservative boundary also protects buffered/non-stream callers:
-			// retrying after their callback mutated state would concatenate two
-			// attempts even if no network bytes were flushed yet.
-			if emitted {
-				return err
-			}
-			var streamErr *kiroStreamError
-			if errors.As(err, &streamErr) || errors.Is(err, errContextTooLong) {
-				return err
-			}
-			if !isRetryableStreamError(err) {
-				return err
-			}
-
-			hasSameEndpointRetry := streamAttempt < maxStreamAttemptsPerEndpoint
-			hasEndpointFallback := epIndex+1 < len(endpoints)
-			if !hasSameEndpointRetry && !hasEndpointFallback {
-				break endpointLoop
-			}
-
-			logger.Warnf("[KiroAPI] Endpoint %s stream failed before any output (attempt %d/%d): %v",
-				ep.Name, streamAttempt, maxStreamAttemptsPerEndpoint, err)
-			if err := streamRetryWait(ctx, streamRetryBackoff); err != nil {
-				return err
-			}
-			if !hasSameEndpointRetry {
-				continue endpointLoop
-			}
+		if streamAttempt == maxStreamAttemptsPerEndpoint {
+			break
+		}
+		logger.Warnf("[KiroAPI] Kiro Runtime failed before output (attempt %d/%d): %v",
+			streamAttempt, maxStreamAttemptsPerEndpoint, lastErr)
+		if err := streamRetryWait(ctx, streamRetryBackoff); err != nil {
+			return err
 		}
 	}
 
@@ -560,6 +451,49 @@ endpointLoop:
 		return lastErr
 	}
 	return fmt.Errorf("all endpoints failed")
+}
+
+type kiroRequestConfig struct {
+	URL          string
+	Origin       string
+	ContentType  string
+	AmzTarget    string
+	HeaderValues func(account *config.Account, host string) kiroHeaderValues
+}
+
+func resolveKiroRequestConfig(account *config.Account, profileArn string) kiroRequestConfig {
+	region := kiroRegionForProfile(account, profileArn)
+	authMethod := ""
+	if account != nil {
+		authMethod = strings.ToLower(strings.TrimSpace(account.AuthMethod))
+	}
+
+	// These are credential-specific official surfaces, not fallback routes.
+	// The IDE runtime rejects API_KEY, IDC and external-IdP bearer tokens.
+	if config.IsAPIKeyAccount(account) {
+		return kiroRequestConfig{
+			URL:          fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", region),
+			Origin:       "KIRO_CLI",
+			ContentType:  "application/json",
+			HeaderValues: buildAgentHeaderValues,
+		}
+	}
+	if authMethod == "external_idp" || authMethod == "external-idp" || authMethod == "idc" {
+		return kiroRequestConfig{
+			URL:          regionalizeURLForProfile(kiroCodeWhispererEndpoint, account, profileArn),
+			Origin:       "AI_EDITOR",
+			ContentType:  "application/json",
+			AmzTarget:    kiroCodeWhispererTarget,
+			HeaderValues: buildCodeWhispererHeaderValues,
+		}
+	}
+	return kiroRequestConfig{
+		URL:          fmt.Sprintf("https://runtime.%s.kiro.dev/", region),
+		Origin:       "AI_EDITOR",
+		ContentType:  "application/x-amz-json-1.0",
+		AmzTarget:    kiroRuntimeTarget,
+		HeaderValues: buildGenerateHeaderValues,
+	}
 }
 
 func isRetryableStreamError(err error) bool {
@@ -653,6 +587,9 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 		if jsonErr != nil {
 			return emitted, fmt.Errorf("invalid Kiro stream JSON: %w", jsonErr)
 		}
+		if wrapped, ok := event[headers.eventType].(map[string]interface{}); ok {
+			event = wrapped
+		}
 		if len(payloadBytes) == 0 {
 			continue
 		}
@@ -683,13 +620,20 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 					callback.OnText(content, false)
 				}
 			}
-		case "reasoningContentEvent":
-			if text, ok := event["text"].(string); ok && text != "" {
+		case "reasoningContentEvent", "reasoningEvent":
+			text, _ := event["text"].(string)
+			if text == "" {
+				text, _ = event["content"].(string)
+			}
+			if text != "" {
 				sawOutput = true
 				if callback.OnText != nil {
 					emitted = true
 					callback.OnText(text, true)
 				}
+			}
+			if signature, ok := event["signature"].(string); ok && signature != "" && callback.OnReasoningSignature != nil {
+				callback.OnReasoningSignature(signature)
 			}
 		case "toolUseEvent":
 			nextToolUse, toolErr := handleToolUseEvent(event, currentToolUse, callback)
@@ -704,6 +648,10 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 		case "contextUsageEvent":
 			if pct, ok := event["contextUsagePercentage"].(float64); ok {
 				contextUsagePercentages = append(contextUsagePercentages, pct)
+			}
+		case "messageStopEvent", "metadataEvent", "MetadataEvent":
+			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" && callback.OnStopReason != nil {
+				callback.OnStopReason(reason)
 			}
 		}
 	}

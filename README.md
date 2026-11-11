@@ -109,7 +109,7 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
   -d '{"kiroApiKey":"ksk_your_key|us-east-1","authMethod":"api_key","nickname":"cli-key"}'
 ```
 
-API Key accounts call the Kiro CLI runtime (`https://runtime.{region}.kiro.dev/`) with `tokentype: API_KEY`. They skip OAuth refresh and do not use `profileArn`.
+OAuth social and Builder ID accounts use the current Kiro IDE transport: `POST https://runtime.{region}.kiro.dev/` with `x-amz-target: KiroRuntimeService.GenerateAssistantResponse`. API Key accounts use the Amazon Q generation surface with `tokentype: API_KEY`; IAM Identity Center and external IdP accounts use the CodeWhisperer surface. This keeps each credential on the host that validates its token type instead of sending every account through the IDE gateway.
 
 ## Thinking Mode
 

@@ -227,11 +227,12 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 				})
 			}
 		} else if msg.Role == "assistant" {
-			content, toolUses := extractClaudeAssistantContent(msg.Content)
+			content, toolUses, reasoning := extractClaudeAssistantContent(msg.Content)
 			history = append(history, KiroHistoryMessage{
 				AssistantResponseMessage: &KiroAssistantResponseMessage{
-					Content:  content,
-					ToolUses: toolUses,
+					Content:          content,
+					ToolUses:         toolUses,
+					ReasoningContent: reasoning,
 				},
 			})
 		}
@@ -292,12 +293,17 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	kiroTools, toolNameMap := convertClaudeTools(req.Tools)
 
 	// 构建 payload
-	payload := &KiroPayload{AdditionalModelRequestFields: nativeThinkingFields(modelID, thinking)}
+	payload := &KiroPayload{
+		AgentMode:                    "vibe",
+		AdditionalModelRequestFields: nativeThinkingFields(modelID, thinking),
+	}
 	payload.ToolNameMap = toolNameMap
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"
-	payload.ConversationState.AgentContinuationId = uuid.New().String()
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstClaudeConversationAnchor(req.Messages))
+	payload.ConversationState.AgentContinuationId = nextAgentContinuationID(
+		payload.ConversationState.ConversationID, finalContent, history, keepCurrentToolResults,
+	)
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: finalContent,
 		ModelID: modelID,
@@ -554,10 +560,14 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 					resultContent = toolResultImagePlaceholder
 				}
 			}
+			status := "success"
+			if isError, _ := block["is_error"].(bool); isError {
+				status = "error"
+			}
 			toolResults = append(toolResults, KiroToolResult{
 				ToolUseID: toolUseID,
 				Content:   []KiroResultContent{{Text: resultContent}},
-				Status:    "success",
+				Status:    status,
 			})
 		}
 	}
@@ -653,12 +663,15 @@ func extractToolResultContent(content interface{}) (string, []KiroImage) {
 	return "", nil
 }
 
-func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) {
+func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse, *KiroReasoning) {
 	var text string
 	var toolUses []KiroToolUse
+	var reasoningText strings.Builder
+	var signature string
+	var redactedContent string
 
 	if s, ok := content.(string); ok {
-		return s, nil
+		return s, nil, nil
 	}
 
 	// Same dual-shape support as extractClaudeUserContent (JSON []interface{}
@@ -682,10 +695,34 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) 
 				Name:      name,
 				Input:     input,
 			})
+		case "thinking":
+			if thinking, ok := block["thinking"].(string); ok {
+				reasoningText.WriteString(thinking)
+			}
+			if value, ok := block["signature"].(string); ok {
+				signature = value
+			}
+		case "redacted_thinking":
+			if value, ok := block["data"].(string); ok {
+				redactedContent = value
+			}
 		}
 	}
 
-	return text, toolUses
+	var reasoning *KiroReasoning
+	if (reasoningText.Len() > 0 && strings.TrimSpace(signature) != "") || redactedContent != "" {
+		reasoning = &KiroReasoning{
+			ReasoningText: &KiroReasoningText{
+				Text:      reasoningText.String(),
+				Signature: signature,
+			},
+			RedactedContent: redactedContent,
+		}
+		if reasoningText.Len() == 0 {
+			reasoning.ReasoningText = nil
+		}
+	}
+	return text, toolUses, reasoning
 }
 
 func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]string) {
@@ -892,13 +929,14 @@ func shortenToolName(name string) string {
 
 // ==================== Kiro -> Claude 转换 ====================
 
-func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
+func KiroToClaudeResponse(content, thinkingContent, thinkingSignature, stopReason string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
 	blocks := make([]ClaudeContentBlock, 0)
 
 	if thinkingContent != "" || includeEmptyThinkingBlock {
 		blocks = append(blocks, ClaudeContentBlock{
-			Type:     "thinking",
-			Thinking: thinkingContent,
+			Type:      "thinking",
+			Thinking:  thinkingContent,
+			Signature: thinkingSignature,
 		})
 	}
 
@@ -918,10 +956,7 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 		})
 	}
 
-	stopReason := "end_turn"
-	if len(toolUses) > 0 {
-		stopReason = "tool_use"
-	}
+	stopReason = claudeStopReason(stopReason, len(toolUses) > 0)
 
 	return &ClaudeResponse{
 		ID:         "msg_" + uuid.New().String(),
@@ -1207,9 +1242,16 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	kiroTools := convertOpenAITools(req.Tools)
 
 	// 构建 payload
-	payload := &KiroPayload{AdditionalModelRequestFields: nativeThinkingFields(modelID, thinking)}
+	payload := &KiroPayload{
+		AgentMode:                    "vibe",
+		AdditionalModelRequestFields: nativeThinkingFields(modelID, thinking),
+	}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
+	payload.ConversationState.AgentTaskType = "vibe"
+	payload.ConversationState.AgentContinuationId = nextAgentContinuationID(
+		payload.ConversationState.ConversationID, finalContent, history, keepCurrentToolResults,
+	)
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: finalContent,
 		ModelID: modelID,
@@ -1535,7 +1577,8 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 	cleaned := history[:0:0]
 	for i := range history {
 		msg := history[i]
-		if msg.AssistantResponseMessage != nil && len(msg.AssistantResponseMessage.ToolUses) == 0 {
+		if msg.AssistantResponseMessage != nil && len(msg.AssistantResponseMessage.ToolUses) == 0 &&
+			msg.AssistantResponseMessage.ReasoningContent == nil {
 			c := strings.TrimSpace(msg.AssistantResponseMessage.Content)
 			if c == "" || c == minimalFallbackUserContent {
 				continue // drop hollow assistant turn
@@ -1635,10 +1678,42 @@ func firstOpenAIConversationAnchor(messages []OpenAIMessage) string {
 func buildConversationID(modelID, systemPrompt, anchor string) string {
 	anchor = strings.TrimSpace(anchor)
 	if isSyntheticConversationAnchor(anchor) {
-		return uuid.New().String()
+		return "sess_" + uuid.New().String()
 	}
 	seed := strings.Join([]string{modelID, strings.TrimSpace(systemPrompt), anchor}, "\n")
-	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed)).String()
+	return "sess_" + deterministicUUIDv4(seed)
+}
+
+func nextAgentContinuationID(conversationID, currentContent string, history []KiroHistoryMessage, continuingTool bool) string {
+	turnAnchor := currentContent
+	if continuingTool {
+		for i := len(history) - 1; i >= 0; i-- {
+			assistant := history[i].AssistantResponseMessage
+			if assistant == nil || len(assistant.ToolUses) == 0 {
+				continue
+			}
+			for j := i - 1; j >= 0; j-- {
+				if user := history[j].UserInputMessage; user != nil && strings.TrimSpace(user.Content) != "" {
+					turnAnchor = user.Content
+					break
+				}
+			}
+			break
+		}
+	}
+	turnAnchor = strings.TrimSpace(turnAnchor)
+	if turnAnchor == "" {
+		turnAnchor = "turn"
+	}
+	seed := conversationID + "\n" + turnAnchor
+	return deterministicUUIDv4(seed)
+}
+
+func deterministicUUIDv4(seed string) string {
+	id := uuid.NewSHA1(uuid.NameSpaceURL, []byte(seed))
+	id[6] = (id[6] & 0x0f) | 0x40
+	id[8] = (id[8] & 0x3f) | 0x80
+	return id.String()
 }
 
 func isSyntheticConversationAnchor(anchor string) bool {
@@ -1909,8 +1984,8 @@ func extractThinkingFromContent(content string) (string, string) {
 }
 
 // KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
-func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
-	finishReason := "stop"
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent, stopReason string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
+	finishReason := openAIFinishReason(stopReason, len(toolUses) > 0)
 
 	message := map[string]interface{}{
 		"role": "assistant",
@@ -1931,7 +2006,6 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			}
 		}
 		message["tool_calls"] = toolCalls
-		finishReason = "tool_calls"
 	} else {
 		// 根据配置格式化 thinking 输出
 		if reasoningContent != "" {
@@ -1964,5 +2038,38 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			"completion_tokens": outputTokens,
 			"total_tokens":      inputTokens + outputTokens,
 		},
+	}
+}
+
+func claudeStopReason(reason string, hasToolUses bool) string {
+	if hasToolUses {
+		return "tool_use"
+	}
+	normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "", " ", "").Replace(strings.TrimSpace(reason)))
+	switch normalized {
+	case "maxtokens", "maxoutputtokens", "length":
+		return "max_tokens"
+	case "refusal", "contentfilter", "guardrail", "safety", "policy", "blocked":
+		return "refusal"
+	case "pauseturn":
+		return "pause_turn"
+	case "stopsequence":
+		return "stop_sequence"
+	default:
+		return "end_turn"
+	}
+}
+
+func openAIFinishReason(reason string, hasToolUses bool) string {
+	if hasToolUses {
+		return "tool_calls"
+	}
+	switch claudeStopReason(reason, false) {
+	case "max_tokens":
+		return "length"
+	case "refusal":
+		return "content_filter"
+	default:
+		return "stop"
 	}
 }

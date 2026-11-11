@@ -124,7 +124,7 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
   -d '{"kiroApiKey":"ksk_your_key|us-east-1","authMethod":"api_key","nickname":"cli-key"}'
 ```
 
-API Key 账号会走 Kiro CLI runtime（`https://runtime.{region}.kiro.dev/`），请求头带 `tokentype: API_KEY`，无需 OAuth 刷新，也不使用 `profileArn`。
+OAuth 社交账号和 Builder ID 使用当前 Kiro IDE 协议：`POST https://runtime.{region}.kiro.dev/`，请求头带 `x-amz-target: KiroRuntimeService.GenerateAssistantResponse`。API Key 使用 Amazon Q 生成入口并带 `tokentype: API_KEY`；IAM Identity Center 和外部 IdP 使用 CodeWhisperer 入口。这样每类凭证都走能验证自身令牌类型的入口，不会把 API Key 错发到 IDE 网关导致 403。
 
 ## 思考模式
 

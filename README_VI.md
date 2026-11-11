@@ -109,7 +109,7 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
   -d '{"kiroApiKey":"ksk_your_key|us-east-1","authMethod":"api_key","nickname":"cli-key"}'
 ```
 
-Tài khoản API Key gọi Kiro CLI runtime (`https://runtime.{region}.kiro.dev/`) với `tokentype: API_KEY`. Chúng bỏ qua OAuth refresh và không dùng `profileArn`.
+Tài khoản OAuth social và Builder ID dùng giao thức Kiro IDE hiện tại: `POST https://runtime.{region}.kiro.dev/` với `x-amz-target: KiroRuntimeService.GenerateAssistantResponse`. API Key dùng bề mặt Amazon Q với `tokentype: API_KEY`; IAM Identity Center và external IdP dùng bề mặt CodeWhisperer. Mỗi loại thông tin đăng nhập đi qua máy chủ xác thực đúng loại token thay vì gửi mọi tài khoản qua IDE gateway.
 
 ## Chế độ Thinking
 
