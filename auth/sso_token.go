@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"kiro-go/config"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -300,16 +302,41 @@ func pollForToken(oidcBase, clientID, clientSecret, deviceCode string, interval 
 	}
 }
 
-// GetUserInfo 获取用户信息
-func GetUserInfo(accessToken string) (email, userID string, err error) {
-	// 调用 Kiro API 获取用量信息（包含用户信息）
-	url := "https://q.us-east-1.amazonaws.com/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true"
+// GetUserInfo obtains the account identity from the current control-plane
+// usage endpoint.
+func GetUserInfo(accessToken, refreshToken, region string) (email, userID string, err error) {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		region = "us-east-1"
+	}
+	host := fmt.Sprintf("management.%s.kiro.dev", region)
+	url := "https://" + host + "/Get-Usage-Limits?origin=AI_EDITOR&isEmailRequired=true"
 
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	clientCfg := config.GetKiroClientConfig()
+	machineID := config.MachineIdForCredentials(refreshToken, "")
+	identity := "KiroIDE-" + clientCfg.KiroVersion
+	if machineID != "" {
+		identity += "-" + machineID
+	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "aws-sdk-js/1.0.18 KiroAPIProxy")
-	req.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.18 KiroAPIProxy")
+	req.Header.Set("X-Amz-User-Agent", "aws-sdk-js/1.0.0 "+identity)
+	req.Header.Set(
+		"User-Agent",
+		fmt.Sprintf(
+			"aws-sdk-js/1.0.0 ua/2.1 os/%s lang/js md/nodejs#%s api/kirocontrolplanebearer#1.0.0 m/N,E %s",
+			clientCfg.SystemVersion,
+			clientCfg.NodeVersion,
+			identity,
+		),
+	)
+	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.NewString())
+	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=1")
+	req.Header.Set("Connection", "close")
+	req.Host = host
 
 	client := httpClient()
 	resp, err := client.Do(req)

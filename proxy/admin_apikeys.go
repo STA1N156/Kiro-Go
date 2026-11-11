@@ -13,7 +13,6 @@ type apiKeyView struct {
 	Name          string  `json:"name,omitempty"`
 	KeyMasked     string  `json:"keyMasked"`
 	Enabled       bool    `json:"enabled"`
-	Migrated      bool    `json:"migrated,omitempty"`
 	CreatedAt     int64   `json:"createdAt"`
 	LastUsedAt    int64   `json:"lastUsedAt,omitempty"`
 	TokenLimit    int64   `json:"tokenLimit,omitempty"`
@@ -29,7 +28,6 @@ func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
 		Name:          e.Name,
 		KeyMasked:     config.MaskApiKey(e.Key),
 		Enabled:       e.Enabled,
-		Migrated:      e.Migrated,
 		CreatedAt:     e.CreatedAt,
 		LastUsedAt:    e.LastUsedAt,
 		TokenLimit:    e.TokenLimit,

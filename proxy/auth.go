@@ -43,52 +43,36 @@ func extractProvidedKey(r *http.Request) string {
 // affecting public deployments).
 //
 // When RequireApiKey is true:
-//  1. If ApiKeys is non-empty, the provided key MUST match an enabled, in-quota
-//     entry. Returns the matched entry (a copy) so callers can attribute usage.
-//  2. Else if the legacy single ApiKey field is set, the provided key MUST match it.
-//  3. Else (switch on but nothing configured) → fail-closed: every request is rejected.
-//     This prevents the prior bug where toggling auth on without keys silently
-//     left the service open.
+// The provided key MUST match an enabled, in-quota entry. If no keys are
+// configured the service fails closed instead of accepting every request.
 //
-// Returns (entry, nil) on success. entry is nil when the legacy single-key path
-// is used or when the master switch is off.
+// Returns (entry, nil) on success. entry is nil when the master switch is off.
 func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
 	if !config.IsApiKeyRequired() {
 		return nil, nil
 	}
 
 	provided := extractProvidedKey(r)
-
-	if config.HasApiKeys() {
-		if provided == "" {
-			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "Invalid or missing API key")
-		}
-		entry := config.FindApiKeyByValue(provided)
-		if entry == nil {
-			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "Invalid or missing API key")
-		}
-		if !entry.Enabled {
-			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key disabled")
-		}
-		if overToken, overCredit := config.ApiKeyOverLimit(*entry); overToken || overCredit {
-			if overToken {
-				return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "token limit exceeded")
-			}
-			return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "credit limit exceeded")
-		}
-		return entry, nil
-	}
-
-	// Legacy single-key path.
-	expected := config.GetApiKey()
-	if expected == "" {
-		// Auth required but nothing configured → fail closed.
-		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key authentication is required but no keys are configured")
-	}
-	if provided == "" || provided != expected {
+	if provided == "" {
 		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "Invalid or missing API key")
 	}
-	return nil, nil
+	if !config.HasApiKeys() {
+		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key authentication is required but no keys are configured")
+	}
+	entry := config.FindApiKeyByValue(provided)
+	if entry == nil {
+		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "Invalid or missing API key")
+	}
+	if !entry.Enabled {
+		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key disabled")
+	}
+	if overToken, overCredit := config.ApiKeyOverLimit(*entry); overToken || overCredit {
+		if overToken {
+			return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "token limit exceeded")
+		}
+		return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "credit limit exceeded")
+	}
+	return entry, nil
 }
 
 // withApiKeyContext attaches the matched entry to the request context so downstream

@@ -33,6 +33,8 @@
 - 多种认证方式：AWS Builder ID、IAM Identity Center (企业 SSO)、Microsoft 企业 SSO、SSO Token、本地缓存、凭证 JSON、Kiro API Key
 - 用量追踪、账号导入导出、中英越三语
 - 支持设置出站代理（SOCKS5 / HTTP）
+- 账号级设备指纹与出口代理，指纹跟随当前凭据，客户端版本、端点、报文形态和请求头成套匹配
+- 图片按上游限制压缩并校正真实 MIME，复杂或超长工具 Schema 自动安全降级，工具参数双编码自动修复
 
 ## 快速开始
 
@@ -124,7 +126,7 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
   -d '{"kiroApiKey":"ksk_your_key|us-east-1","authMethod":"api_key","nickname":"cli-key"}'
 ```
 
-OAuth 社交账号和 Builder ID 使用当前 Kiro IDE 协议：`POST https://runtime.{region}.kiro.dev/`，请求头带 `x-amz-target: KiroRuntimeService.GenerateAssistantResponse`。API Key 使用 Amazon Q 生成入口并带 `tokentype: API_KEY`；IAM Identity Center 和外部 IdP 使用 CodeWhisperer 入口。这样每类凭证都走能验证自身令牌类型的入口，不会把 API Key 错发到 IDE 网关导致 403。
+默认使用 Kiro IDE `1.0.212` 指纹：`POST https://runtime.{region}.kiro.dev/generateAssistantResponse`，`Content-Type: application/json`，并发送完整的 Event Stream、agent-mode、SDK 请求头和设备指纹。账号详情可单独选择 `runtime`、`q-rest`、`q` 或 `responses`；`responses` 会切换成 Kiro IDE `1.4.121` 的原生 `/v1/responses` 请求、报文和专用请求头。客户端版本、UA、端点、报文形态始终作为同一套指纹一起切换。
 
 ## 思考模式
 

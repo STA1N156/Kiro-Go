@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	kiroRestAPIBase               = "https://codewhisperer.us-east-1.amazonaws.com"
 	profileArnUnsupportedCooldown = 24 * time.Hour
 	maxProfileResponseBytes       = 1 << 20
 	maxProfileErrorBytes          = 64 << 10
+	maxModelCatalogPages          = 10
 )
 
 var profileArnResolutionCooldowns sync.Map
@@ -90,38 +90,6 @@ func kiroRegionForProfile(account *config.Account, profileArn string) string {
 	return "us-east-1"
 }
 
-// regionalizeURL points a hardcoded us-east-1 Kiro endpoint at the profile's
-// data-plane region. Amazon Q is regional (q.{region}.amazonaws.com), but the CodeWhisperer
-// REST host only exists in us-east-1 — non-us-east-1 accounts are served by the
-// regional Amazon Q host instead. Both us-east-1 hosts map
-// to q.{region}. It is a no-op for us-east-1 profiles.
-func regionalizeURL(rawURL string, account *config.Account) string {
-	return regionalizeURLForProfile(rawURL, account, "")
-}
-
-func regionalizeURLForProfile(rawURL string, account *config.Account, profileArn string) string {
-	region := kiroRegionForProfile(account, profileArn)
-	return regionalizeURLForRegion(rawURL, region)
-}
-
-// regionalizeURLForRegion targets one explicit Kiro data-plane region. The
-// caller supplies a validated region candidate; Account.Region is never
-// mutated by this operation.
-func regionalizeURLForRegion(rawURL, region string) string {
-	region = strings.TrimSpace(strings.ToLower(region))
-	if region == "us-east-1" {
-		return rawURL
-	}
-	if !kiroRegionPattern.MatchString(region) {
-		return rawURL
-	}
-	regionalHost := "q." + region + ".amazonaws.com"
-	return strings.NewReplacer(
-		"q.us-east-1.amazonaws.com", regionalHost,
-		"codewhisperer.us-east-1.amazonaws.com", regionalHost,
-	).Replace(rawURL)
-}
-
 func kiroProfileRegionCandidates(account *config.Account) []string {
 	seen := make(map[string]struct{})
 	candidates := make([]string, 0, len(defaultKiroProfileRegions)+1)
@@ -139,8 +107,9 @@ func kiroProfileRegionCandidates(account *config.Account) []string {
 
 	if account != nil {
 		// Profile ARN is authoritative. Account.Region is the authentication
-		// region and may not host an Amazon Q Developer profile.
+		// region, so it is tried first but does not override a profile ARN.
 		add(regionFromProfileArn(account.ProfileArn))
+		add(account.Region)
 	}
 	for _, region := range defaultKiroProfileRegions {
 		add(region)
@@ -154,16 +123,12 @@ func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 		return nil, fmt.Errorf("resolve profileArn: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
-	url = regionalizeURL(url, account)
-	url = withProfileArnQuery(url, account)
-
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", buildKiroUsageURL(account), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	setKiroHeaders(req, account)
+	applyKiroUsageHeaders(req, account)
 
 	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 	if err != nil {
@@ -183,72 +148,57 @@ func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 	return &result, nil
 }
 
-// GetUserInfo 获取用户信息
-func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
-	url := regionalizeURL(fmt.Sprintf("%s/GetUserInfo", kiroRestAPIBase), account)
-
-	payload := `{"origin":"KIRO_IDE"}`
-	req, err := http.NewRequest("POST", url, strings.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-
-	setKiroHeaders(req, account)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result UserInfoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
 // ListAvailableModels 获取可用模型列表
 func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 	if err := ensureRestProfileArn(account); err != nil {
 		return nil, fmt.Errorf("resolve profileArn: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
-	url = regionalizeURL(url, account)
-	url = withProfileArnQuery(url, account)
+	region := kiroRegion(account)
+	host := fmt.Sprintf("management.%s.kiro.dev", region)
+	client := GetRestClientForProxy(ResolveAccountProxyURL(account))
+	models := make([]ModelInfo, 0)
+	nextToken := ""
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
+	for page := 0; page < maxModelCatalogPages; page++ {
+		query := "origin=AI_EDITOR"
+		if account != nil && strings.TrimSpace(account.ProfileArn) != "" {
+			query += "&profileArn=" + neturl.QueryEscape(strings.TrimSpace(account.ProfileArn))
+		}
+		if nextToken != "" {
+			query += "&nextToken=" + neturl.QueryEscape(nextToken)
+		}
+		req, err := http.NewRequest("GET", "https://"+host+"/List-Available-Models?"+query, nil)
+		if err != nil {
+			return nil, err
+		}
+		applyKiroManagementHeaders(req, account, "kirocontrolplanebearer", "1")
 
-	setKiroHeaders(req, account)
-
-	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
-	if err != nil {
-		return nil, err
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxProfileErrorBytes))
+			resp.Body.Close()
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		}
+		var result struct {
+			Models    []ModelInfo `json:"models"`
+			NextToken string      `json:"nextToken"`
+		}
+		err = json.NewDecoder(io.LimitReader(resp.Body, maxProfileResponseBytes)).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		models = append(models, result.Models...)
+		nextToken = strings.TrimSpace(result.NextToken)
+		if nextToken == "" {
+			break
+		}
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result struct {
-		Models []ModelInfo `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return result.Models, nil
+	return models, nil
 }
 
 // ResolveProfileArn returns the account profile ARN, fetching and caching it
@@ -493,10 +443,6 @@ type KiroProfile struct {
 	Region string `json:"region"`
 }
 
-func listKiroProfilesInRegion(account *config.Account, region string) ([]KiroProfile, error) {
-	return listKiroProfilesInRegionContext(context.Background(), account, region)
-}
-
 func listKiroProfilesInRegionContext(
 	ctx context.Context,
 	account *config.Account,
@@ -506,19 +452,18 @@ func listKiroProfilesInRegionContext(
 	if !kiroRegionPattern.MatchString(region) {
 		return nil, fmt.Errorf("invalid Kiro profile region %q", region)
 	}
-	endpoint := regionalizeURLForRegion(fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), region)
+	host := fmt.Sprintf("management.%s.kiro.dev", region)
+	endpoint := "https://" + host + "/ListAvailableProfiles"
 	client := GetRestClientForProxy(ResolveAccountProxyURL(account))
 
 	profiles := make([]KiroProfile, 0)
 	seen := make(map[string]struct{})
 	invalidCount := 0
 	nextToken := ""
-	// Bound pagination so a misbehaving upstream cannot loop forever. 20 pages
-	// of 50 is far above any realistic Kiro profile count.
+	// Bound pagination so a misbehaving upstream cannot loop forever.
 	const maxProfilePages = 20
-	const pageSize = 50
 	for page := 0; page < maxProfilePages; page++ {
-		requestBody := map[string]interface{}{"maxResults": pageSize}
+		requestBody := map[string]interface{}{}
 		if nextToken != "" {
 			requestBody["nextToken"] = nextToken
 		}
@@ -530,7 +475,7 @@ func listKiroProfilesInRegionContext(
 		if err != nil {
 			return nil, err
 		}
-		setKiroHeaders(req, account)
+		applyKiroManagementHeaders(req, account, "codewhispererruntime", "1")
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := client.Do(req)
@@ -643,28 +588,6 @@ func DiscoverKiroProfilesContext(ctx context.Context, account *config.Account) (
 		return nil, errors.Join(probeErrors...)
 	}
 	return nil, fmt.Errorf("no available Kiro profile")
-}
-
-func withProfileArnQuery(rawURL string, account *config.Account) string {
-	if account == nil {
-		return rawURL
-	}
-	profileArn := strings.TrimSpace(account.ProfileArn)
-	if profileArn == "" {
-		return rawURL
-	}
-	return rawURL + "&profileArn=" + neturl.QueryEscape(profileArn)
-}
-
-func setKiroHeaders(req *http.Request, account *config.Account) {
-	host := ""
-	if req.URL != nil {
-		host = req.URL.Host
-	}
-	headerValues := buildRuntimeHeaderValues(account, host)
-
-	req.Header.Set("Accept", "application/json")
-	applyKiroBaseHeaders(req, account, headerValues)
 }
 
 // RefreshAccountInfo 刷新账户信息（使用量、订阅等）
@@ -856,13 +779,6 @@ type SubscriptionInfo struct {
 type UserInfo struct {
 	Email  string `json:"email"`
 	UserId string `json:"userId"`
-}
-
-type UserInfoResponse struct {
-	Email  string `json:"email"`
-	UserId string `json:"userId"`
-	Idp    string `json:"idp"`
-	Status string `json:"status"`
 }
 
 type ModelInfo struct {

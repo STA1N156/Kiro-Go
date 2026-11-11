@@ -8,14 +8,9 @@ import (
 	"kiro-go/config"
 	"kiro-go/logger"
 	"net/http"
-	neturl "net/url"
 	"strings"
 	"time"
 )
-
-// kiroQAPIBase is the AWS Q Developer endpoint that owns the user-level Overages
-// switch. Distinct from kiroRestAPIBase (CodeWhisperer) which is used elsewhere.
-const kiroQAPIBase = "https://q.us-east-1.amazonaws.com"
 
 // OverageSnapshot captures the upstream Overages state for an account.
 type OverageSnapshot struct {
@@ -46,7 +41,7 @@ type upstreamOverageResponse struct {
 	} `json:"usageBreakdownList"`
 }
 
-// FetchOverageStatus calls AWS Q `GET /getUsageLimits` and extracts the
+// FetchOverageStatus calls the Kiro control-plane usage endpoint and extracts the
 // Overages switch state plus subscription metadata.
 func FetchOverageStatus(account *config.Account) (*OverageSnapshot, error) {
 	if account == nil {
@@ -56,16 +51,11 @@ func FetchOverageStatus(account *config.Account) (*OverageSnapshot, error) {
 		return nil, fmt.Errorf("resolve profileArn: %w", err)
 	}
 
-	rawURL := regionalizeURL(kiroQAPIBase+"/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", account)
-	if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {
-		rawURL += "&profileArn=" + neturl.QueryEscape(profileArn)
-	}
-
-	req, err := http.NewRequest("GET", rawURL, nil)
+	req, err := http.NewRequest("GET", buildKiroUsageURL(account), nil)
 	if err != nil {
 		return nil, err
 	}
-	setKiroHeaders(req, account)
+	applyKiroUsageHeaders(req, account)
 
 	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 	if err != nil {
@@ -108,7 +98,7 @@ func FetchOverageStatus(account *config.Account) (*OverageSnapshot, error) {
 	return snap, nil
 }
 
-// SetOverageStatus calls AWS Q `POST /setUserPreference` to flip the user-level
+// SetOverageStatus calls the Kiro control plane to flip the user-level
 // Overages switch, then re-fetches the snapshot for cache write-through.
 //
 // `enabled=true`  → overageStatus="ENABLED"
@@ -135,11 +125,12 @@ func SetOverageStatus(account *config.Account, enabled bool) (*OverageSnapshot, 
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("POST", regionalizeURL(kiroQAPIBase+"/setUserPreference", account), bytes.NewReader(body))
+	host := fmt.Sprintf("management.%s.kiro.dev", kiroRegion(account))
+	req, err := http.NewRequest("POST", "https://"+host+"/setUserPreference", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	setKiroHeaders(req, account)
+	applyKiroManagementHeaders(req, account, "kirocontrolplanebearer", "1")
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)

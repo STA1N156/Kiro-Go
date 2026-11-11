@@ -13,11 +13,11 @@ package config
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +43,77 @@ func GenerateMachineId() string {
 		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
 }
 
+// NormalizeMachineId converts an explicit UUID/hex override to the
+// 64-character device identifier used by the official Kiro client.
+func NormalizeMachineId(machineID string) string {
+	trimmed := strings.TrimSpace(machineID)
+	if len(trimmed) == 64 {
+		if _, err := hex.DecodeString(trimmed); err == nil {
+			return strings.ToLower(trimmed)
+		}
+	}
+	compact := strings.ReplaceAll(trimmed, "-", "")
+	if len(compact) == 32 {
+		if _, err := hex.DecodeString(compact); err == nil {
+			compact = strings.ToLower(compact)
+			return compact + compact
+		}
+	}
+	return ""
+}
+
+// MachineIdForCredentials derives a stable client fingerprint from the
+// credential itself. This is the same shape used by official OAuth and API-key
+// clients and prevents a new machine id from being generated on every import.
+func MachineIdForCredentials(refreshToken, apiKey string) string {
+	if key := strings.TrimSpace(apiKey); strings.HasPrefix(key, "ksk_") && len(key) > len("ksk_") {
+		sum := sha256.Sum256([]byte("KiroAPIKey/" + key))
+		return fmt.Sprintf("%x", sum[:])
+	}
+	if token := strings.TrimSpace(refreshToken); token != "" {
+		sum := sha256.Sum256([]byte("KotlinNativeAPI/" + token))
+		return fmt.Sprintf("%x", sum[:])
+	}
+	return GenerateMachineId()
+}
+
+// EffectiveMachineId follows the current official client behavior. API keys
+// derive from the key, OAuth credentials derive from the current rotating
+// refresh token, and an explicitly edited id can be pinned by the operator.
+func EffectiveMachineId(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	if account.MachineIdLocked && strings.TrimSpace(account.MachineId) != "" {
+		if normalized := NormalizeMachineId(account.MachineId); normalized != "" {
+			return normalized
+		}
+	}
+	if IsAPIKeyAccount(account) {
+		return MachineIdForCredentials("", account.KiroApiKey)
+	}
+	if token := strings.TrimSpace(account.RefreshToken); token != "" {
+		return MachineIdForCredentials(token, "")
+	}
+	return NormalizeMachineId(account.MachineId)
+}
+
+func KiroVersionForAccount(account *Account) string {
+	cfg := GetKiroClientConfig()
+	if account != nil && strings.EqualFold(strings.TrimSpace(account.KiroEndpoint), "responses") {
+		return cfg.ResponsesVersion
+	}
+	return cfg.KiroVersion
+}
+
+func KiroNodeVersionForAccount(account *Account) string {
+	cfg := GetKiroClientConfig()
+	if account != nil && strings.EqualFold(strings.TrimSpace(account.KiroEndpoint), "responses") {
+		return cfg.ResponsesNode
+	}
+	return cfg.NodeVersion
+}
+
 // Account represents a Kiro API account with authentication credentials and usage statistics.
 type Account struct {
 	// Basic identification
@@ -61,16 +132,18 @@ type Account struct {
 	// KiroApiKey is a headless Kiro API key (typically ksk_...). When set,
 	// AuthMethod is "api_key" and the key is used directly as the Bearer token
 	// without OAuth refresh. AccessToken is kept in sync for the shared request path.
-	KiroApiKey   string `json:"kiroApiKey,omitempty"`
-	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
-	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
-	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc", "social", "external_idp", or "api_key"
-	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub", "AzureAD")
-	Region       string `json:"region"`                 // AWS region for OIDC endpoints / API Key data plane
-	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
-	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds); unused for API Key
-	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
-	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
+	KiroApiKey      string `json:"kiroApiKey,omitempty"`
+	ClientID        string `json:"clientId,omitempty"`        // OIDC client ID (for IdC auth)
+	ClientSecret    string `json:"clientSecret,omitempty"`    // OIDC client secret (for IdC auth)
+	AuthMethod      string `json:"authMethod"`                // Authentication method: "idc", "social", "external_idp", or "api_key"
+	Provider        string `json:"provider,omitempty"`        // Identity provider name (e.g., "BuilderId", "GitHub", "AzureAD")
+	Region          string `json:"region"`                    // AWS region for OIDC endpoints / API Key data plane
+	StartUrl        string `json:"startUrl,omitempty"`        // AWS SSO start URL
+	ExpiresAt       int64  `json:"expiresAt,omitempty"`       // Token expiration timestamp (Unix seconds); unused for API Key
+	MachineId       string `json:"machineId,omitempty"`       // Explicit or imported machine identifier
+	MachineIdLocked bool   `json:"machineIdLocked,omitempty"` // Explicit override; OAuth otherwise follows the current refresh token
+	KiroEndpoint    string `json:"kiroEndpoint,omitempty"`    // runtime, q-rest, q, or responses
+	ProfileArn      string `json:"profileArn,omitempty"`      // CodeWhisperer/Kiro profile ARN for generation requests
 
 	// Microsoft Enterprise SSO uses an external OAuth2 public client. These
 	// fields are deliberately separate from the AWS IdC client secret/region:
@@ -86,7 +159,7 @@ type Account struct {
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 
-	// Upstream Overages state (mirrored from AWS Q `setUserPreference` / `getUsageLimits`).
+	// Upstream Overages state (mirrored from Kiro control-plane usage APIs).
 	// OverageStatus is the only switch that decides whether to keep dispatching once UsageLimit is reached.
 	// Allowed values: "ENABLED", "DISABLED", "UNKNOWN" (or empty when not yet fetched).
 	OverageStatus     string  `json:"overageStatus,omitempty"`
@@ -95,13 +168,6 @@ type Account struct {
 	OverageRate       float64 `json:"overageRate,omitempty"`       // Per-invocation rate (USD)
 	CurrentOverages   float64 `json:"currentOverages,omitempty"`   // Cumulative overage charges (USD)
 	OverageCheckedAt  int64   `json:"overageCheckedAt,omitempty"`  // Last successful upstream sync (Unix seconds)
-
-	// LegacyAllowOverage is kept for backward-compatible JSON loading only.
-	// Pre-Overages-switch deployments persisted `allowOverage: true` to mean
-	// "keep dispatching when quota is exhausted". On first load we migrate it
-	// into OverageStatus="ENABLED" and zero this field so it does not get
-	// re-emitted on future saves. Do not read this field elsewhere.
-	LegacyAllowOverage bool `json:"allowOverage,omitempty"`
 
 	// Account status
 	Enabled   bool   `json:"enabled"`             // Whether account is active in the pool
@@ -153,12 +219,11 @@ type PromptFilterRule struct {
 // Limits with value 0 are treated as "no limit". Counters are cumulative and never reset
 // automatically; operators can use the admin endpoint to manually reset them.
 type ApiKeyEntry struct {
-	ID         string `json:"id"`                 // Unique identifier (UUID)
-	Name       string `json:"name,omitempty"`     // Human-readable label
-	Key        string `json:"key"`                // The actual key value clients send
-	Enabled    bool   `json:"enabled"`            // Whether this key may authenticate
-	Migrated   bool   `json:"migrated,omitempty"` // True if migrated from legacy single ApiKey field
-	CreatedAt  int64  `json:"createdAt"`          // Creation timestamp (Unix seconds)
+	ID         string `json:"id"`             // Unique identifier (UUID)
+	Name       string `json:"name,omitempty"` // Human-readable label
+	Key        string `json:"key"`            // The actual key value clients send
+	Enabled    bool   `json:"enabled"`        // Whether this key may authenticate
+	CreatedAt  int64  `json:"createdAt"`      // Creation timestamp (Unix seconds)
 	LastUsedAt int64  `json:"lastUsedAt,omitempty"`
 
 	// Limits (0 = unlimited)
@@ -183,8 +248,7 @@ type Config struct {
 	Password                string          `json:"password"`          // Admin panel password
 	Port                    int             `json:"port"`              // HTTP server port (default: 8080)
 	Host                    string          `json:"host"`              // HTTP server bind address (default: 0.0.0.0)
-	ApiKey                  string          `json:"apiKey,omitempty"`  // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
-	RequireApiKey           bool            `json:"requireApiKey"`     // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
+	RequireApiKey           bool            `json:"requireApiKey"`     // Whether downstream requests must present a configured API key
 	ApiKeys                 []ApiKeyEntry   `json:"apiKeys,omitempty"` // Multiple API keys, each with independent quota
 	Accounts                []Account       `json:"accounts"`          // Registered Kiro accounts
 	ModelCooldowns          []ModelCooldown `json:"modelCooldowns,omitempty"`
@@ -200,6 +264,7 @@ type Config struct {
 	// usage quota has been exhausted. When enabled, the pool will not skip accounts
 	// solely because usageCurrent >= usageLimit.
 	AllowOverUsage          bool     `json:"allowOverUsage,omitempty"`
+	QEndpoint               bool     `json:"qEndpoint,omitempty"`
 	LocalCacheEnabled       *bool    `json:"localCacheEnabled,omitempty"`
 	LocalCacheTTLMinutes    int      `json:"localCacheTTLMinutes,omitempty"`
 	LocalCacheMaxHitPercent *float64 `json:"localCacheMaxHitPercent,omitempty"`
@@ -209,10 +274,6 @@ type Config struct {
 	//         "http://host:port",  "http://user:pass@host:port"
 	// Leave empty to connect directly.
 	ProxyURL string `json:"proxyURL,omitempty"`
-
-	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
-	// Migrated to FilterClaudeCode on first load. Do not use directly.
-	SanitizeClaudeCodePrompt bool `json:"sanitizeClaudeCodePrompt,omitempty"`
 
 	// FilterClaudeCode detects the Claude Code CLI built-in system prompt and replaces it
 	// with a compact backend-only prompt, reducing token usage significantly.
@@ -307,65 +368,15 @@ func loadLocked() error {
 		return err
 	}
 
-	var c struct {
-		Config
-		ModelCooldownMinutes int `json:"modelCooldownMinutes"` // Legacy storage only.
-	}
-	c.ModelCooldownSeconds = -1 // Distinguish an absent setting from explicitly disabled cooldowns.
-	if err := json.Unmarshal(data, &c); err != nil {
+	loaded := Config{ModelCooldownSeconds: 60}
+	if err := json.Unmarshal(data, &loaded); err != nil {
 		return err
 	}
-	if c.ModelCooldownSeconds == -1 {
-		c.ModelCooldownSeconds = 60
-		if c.ModelCooldownMinutes >= 1 && c.ModelCooldownMinutes <= 10080 {
-			c.ModelCooldownSeconds = c.ModelCooldownMinutes * 60
-		}
+	if loaded.ModelCooldownSeconds < 0 {
+		loaded.ModelCooldownSeconds = 60
 	}
-	cfg = &c.Config
+	cfg = &loaded
 	statsRevision, savedStatsRevision = 0, 0
-
-	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
-	// promote it into the new structure. The migrated entry inherits the legacy
-	// RequireApiKey state — if the legacy deployment was public (RequireApiKey=false),
-	// we mark the entry disabled so it doesn't accidentally start enforcing auth.
-	// Operators can flip it on later from the admin UI. The legacy field is kept
-	// for backward compatibility when reading older config files.
-	if cfg.ApiKey != "" && len(cfg.ApiKeys) == 0 {
-		cfg.ApiKeys = append(cfg.ApiKeys, ApiKeyEntry{
-			ID:        newUUID(),
-			Name:      "legacy",
-			Key:       cfg.ApiKey,
-			Enabled:   cfg.RequireApiKey,
-			Migrated:  true,
-			CreatedAt: time.Now().Unix(),
-		})
-		if err := saveLocked(); err != nil {
-			return err
-		}
-	}
-
-	// Migration: per-account AllowOverage → OverageStatus.
-	// Pre-Overages-switch deployments stored `allowOverage: true` to mean "keep
-	// dispatching when quota is exhausted". The new model reads OverageStatus
-	// from the upstream AWS Q switch instead. To avoid silently disabling
-	// previously-allowed accounts on first launch, treat allowOverage=true as
-	// OverageStatus="ENABLED" (operators can refresh from AWS later). The
-	// legacy field is then cleared so future saves don't re-emit it.
-	overageMigrated := false
-	for i := range cfg.Accounts {
-		if cfg.Accounts[i].LegacyAllowOverage {
-			if cfg.Accounts[i].OverageStatus == "" {
-				cfg.Accounts[i].OverageStatus = "ENABLED"
-			}
-			cfg.Accounts[i].LegacyAllowOverage = false
-			overageMigrated = true
-		}
-	}
-	if overageMigrated {
-		if err := saveLocked(); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -500,15 +511,11 @@ func IsAPIKeyAccount(account *Account) bool {
 	if account == nil {
 		return false
 	}
-	if strings.TrimSpace(account.KiroApiKey) != "" {
-		return true
-	}
-	method := strings.ToLower(strings.TrimSpace(account.AuthMethod))
-	return method == "api_key" || method == "apikey"
+	key := strings.TrimSpace(account.KiroApiKey)
+	return strings.HasPrefix(key, "ksk_") && len(key) > len("ksk_")
 }
 
 // SplitKiroAPIKeyAndRegion parses the convenience form "key|region".
-// The key itself is not restricted to a fixed prefix so future formats remain compatible.
 func SplitKiroAPIKeyAndRegion(raw string) (key, region string, err error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -521,6 +528,9 @@ func SplitKiroAPIKeyAndRegion(raw string) (key, region string, err error) {
 	key = strings.TrimSpace(parts[0])
 	if key == "" {
 		return "", "", errors.New("key before pipe is empty")
+	}
+	if !strings.HasPrefix(key, "ksk_") || len(key) == len("ksk_") {
+		return "", "", errors.New("Kiro API key must start with ksk_")
 	}
 	if len(parts) == 2 {
 		region = strings.TrimSpace(parts[1])
@@ -677,6 +687,9 @@ func AddAccount(account Account) error {
 		}
 	} else if account.RefreshTokenFingerprint == "" {
 		account.RefreshTokenFingerprint = RefreshTokenFingerprint(account.RefreshToken)
+	}
+	if strings.TrimSpace(account.MachineId) == "" {
+		account.MachineId = MachineIdForCredentials(account.RefreshToken, account.KiroApiKey)
 	}
 	for _, existing := range cfg.Accounts {
 		if account.ID != "" && existing.ID == account.ID {
@@ -915,30 +928,13 @@ func UpdateAccountCredentialState(
 	return ErrAccountNotFound
 }
 
-func GetApiKey() string {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	return cfg.ApiKey
-}
-
 func IsApiKeyRequired() bool {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	return cfg.RequireApiKey
 }
 
-func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	cfg.ApiKey = apiKey
-	cfg.RequireApiKey = requireApiKey
-	if password != "" {
-		cfg.Password = password
-	}
-	return Save()
-}
-
-func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string, modelCooldownSeconds, maxAccountRetryAttempts *int) error {
+func UpdateSettingsPatch(requireApiKey *bool, password string, modelCooldownSeconds, maxAccountRetryAttempts *int) error {
 	if modelCooldownSeconds != nil && (*modelCooldownSeconds < 0 || *modelCooldownSeconds > 604800) {
 		return fmt.Errorf("model cooldown must be 0–604800 seconds")
 	}
@@ -948,9 +944,6 @@ func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string, m
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	previous := *cfg
-	if apiKey != nil {
-		cfg.ApiKey = *apiKey
-	}
 	if requireApiKey != nil {
 		cfg.RequireApiKey = *requireApiKey
 	}
@@ -1027,14 +1020,13 @@ func UpdateAccountInfo(id string, info AccountInfo) error {
 }
 
 // GetFilterClaudeCode returns whether Claude Code system prompt detection is enabled.
-// Also checks the legacy SanitizeClaudeCodePrompt flag for backward compatibility.
 func GetFilterClaudeCode() bool {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	if cfg == nil {
 		return false
 	}
-	return cfg.FilterClaudeCode || cfg.SanitizeClaudeCodePrompt
+	return cfg.FilterClaudeCode
 }
 
 // GetFilterEnvNoise returns whether environment noise line stripping is enabled.
@@ -1075,7 +1067,7 @@ func GetPromptFilterConfig() PromptFilterConfig {
 	rules := make([]PromptFilterRule, len(cfg.PromptFilterRules))
 	copy(rules, cfg.PromptFilterRules)
 	return PromptFilterConfig{
-		FilterClaudeCode:      cfg.FilterClaudeCode || cfg.SanitizeClaudeCodePrompt,
+		FilterClaudeCode:      cfg.FilterClaudeCode,
 		FilterEnvNoise:        cfg.FilterEnvNoise,
 		FilterStripBoundaries: cfg.FilterStripBoundaries,
 		Rules:                 rules,
@@ -1089,8 +1081,6 @@ func UpdatePromptFilterConfig(filterClaudeCode, filterEnvNoise, filterStripBound
 	cfg.FilterClaudeCode = filterClaudeCode
 	cfg.FilterEnvNoise = filterEnvNoise
 	cfg.FilterStripBoundaries = filterStripBoundaries
-	// Clear legacy flag to avoid double-applying after first save
-	cfg.SanitizeClaudeCodePrompt = false
 	if rules != nil {
 		cfg.PromptFilterRules = rules
 	}
@@ -1204,26 +1194,28 @@ func UpdateLogLevel(level string) error {
 }
 
 type KiroClientConfig struct {
-	KiroVersion   string
-	SystemVersion string
-	NodeVersion   string
+	KiroVersion      string
+	SystemVersion    string
+	NodeVersion      string
+	StreamingSDK     string
+	ResponsesVersion string
+	ResponsesNode    string
 }
 
 func GetKiroClientConfig() KiroClientConfig {
 	return KiroClientConfig{
-		KiroVersion:   "1.4.154",
-		SystemVersion: defaultSystemVersion(),
-		NodeVersion:   "22.22.2",
+		KiroVersion:      "1.0.212",
+		SystemVersion:    defaultSystemVersion(),
+		NodeVersion:      "22.22.0",
+		StreamingSDK:     "1.0.34",
+		ResponsesVersion: "1.4.121",
+		ResponsesNode:    "24.22.1",
 	}
 }
 
 func defaultSystemVersion() string {
-	switch runtime.GOOS {
-	case "windows":
-		return "win32#10.0.22631"
-	case "darwin":
-		return "darwin#24.6.0"
-	default:
-		return "linux#6.6.87"
-	}
+	// The official Kiro desktop client is distributed with this fixed platform
+	// marker. Reporting the container OS instead creates an impossible client
+	// fingerprint and changes when the deployment host changes.
+	return "darwin#24.6.0"
 }

@@ -46,12 +46,6 @@ var (
 	streamRetryWait            = waitForStreamRetry
 )
 
-const (
-	kiroRuntimeTarget         = "KiroRuntimeService.GenerateAssistantResponse"
-	kiroCodeWhispererTarget   = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
-	kiroCodeWhispererEndpoint = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
-)
-
 // Global HTTP clients, swappable at runtime to apply proxy reconfiguration without restart.
 var kiroHttpStore atomic.Pointer[http.Client]
 var kiroRestHttpStore atomic.Pointer[http.Client]
@@ -121,8 +115,6 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 		if u, err := url.Parse(proxyURL); err == nil {
 			t.Proxy = http.ProxyURL(u)
 		}
-	} else {
-		t.Proxy = http.ProxyFromEnvironment
 	}
 	return t
 }
@@ -147,33 +139,38 @@ func InitKiroHttpClient(proxyURL string) {
 // KiroPayload is the top-level request body sent to the Kiro API.
 type KiroPayload struct {
 	ConversationState struct {
-		CurrentMessage struct {
+		AgentContinuationId string `json:"agentContinuationId,omitempty"`
+		AgentTaskType       string `json:"agentTaskType,omitempty"`
+		ChatTriggerType     string `json:"chatTriggerType"`
+		CurrentMessage      struct {
 			UserInputMessage KiroUserInputMessage `json:"userInputMessage"`
 		} `json:"currentMessage"`
-		ChatTriggerType     string               `json:"chatTriggerType"`
-		ConversationID      string               `json:"conversationId"`
-		History             []KiroHistoryMessage `json:"history,omitempty"`
-		AgentContinuationId string               `json:"agentContinuationId,omitempty"`
-		AgentTaskType       string               `json:"agentTaskType,omitempty"`
+		ConversationID string               `json:"conversationId"`
+		History        []KiroHistoryMessage `json:"history,omitempty"`
 	} `json:"conversationState"`
 	ProfileArn                   string                 `json:"profileArn,omitempty"`
-	AgentMode                    string                 `json:"agentMode,omitempty"`
-	InferenceConfig              *InferenceConfig       `json:"inferenceConfig,omitempty"`
 	AdditionalModelRequestFields map[string]interface{} `json:"additionalModelRequestFields,omitempty"`
+	AgentMode                    string                 `json:"agentMode,omitempty"`
 
 	// ToolNameMap maps shortened tool names (sent to Kiro) back to the
 	// original names supplied by the client. Used to restore original names
 	// in tool_use responses so the client can match them to its tool registry.
 	// Not serialized to the Kiro API request body.
 	ToolNameMap map[string]string `json:"-"`
+
+	// ToolRepairFields maps the wire tool name to top-level parameters that the
+	// schema declares as arrays/objects. If a model double-encodes one of those
+	// values as a JSON string, the response path unwraps it before returning to
+	// the client.
+	ToolRepairFields map[string]map[string]bool `json:"-"`
 }
 
 type KiroUserInputMessage struct {
-	Content                 string                   `json:"content"`
 	UserInputMessageContext *UserInputMessageContext `json:"userInputMessageContext,omitempty"`
-	Origin                  string                   `json:"origin"`
-	Images                  []KiroImage              `json:"images,omitempty"`
+	Content                 string                   `json:"content"`
 	ModelID                 string                   `json:"modelId,omitempty"`
+	Images                  []KiroImage              `json:"images,omitempty"`
+	Origin                  string                   `json:"origin"`
 }
 
 type UserInputMessageContext struct {
@@ -183,9 +180,9 @@ type UserInputMessageContext struct {
 
 type KiroToolWrapper struct {
 	ToolSpecification struct {
-		InputSchema InputSchema `json:"inputSchema"`
 		Name        string      `json:"name"`
 		Description string      `json:"description"`
+		InputSchema InputSchema `json:"inputSchema"`
 	} `json:"toolSpecification"`
 }
 
@@ -235,12 +232,6 @@ type KiroToolUse struct {
 	ToolUseID string                 `json:"toolUseId"`
 	Name      string                 `json:"name"`
 	Input     map[string]interface{} `json:"input"`
-}
-
-type InferenceConfig struct {
-	MaxTokens   int     `json:"maxTokens,omitempty"`
-	Temperature float64 `json:"temperature,omitempty"`
-	TopP        float64 `json:"topP,omitempty"`
 }
 
 // ==================== Stream Callbacks ====================
@@ -322,11 +313,16 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 	setPayloadProfileArnForAccount(payload, account)
 
 	// Wrap OnToolUse to restore original tool names for the client.
-	if callback != nil && callback.OnToolUse != nil && len(payload.ToolNameMap) > 0 {
+	if callback != nil && callback.OnToolUse != nil &&
+		(len(payload.ToolNameMap) > 0 || len(payload.ToolRepairFields) > 0) {
 		originalOnToolUse := callback.OnToolUse
 		nameMap := payload.ToolNameMap
+		repairFields := payload.ToolRepairFields
 		wrapped := *callback
 		wrapped.OnToolUse = func(tu KiroToolUse) {
+			if fields := repairFields[tu.Name]; len(fields) > 0 {
+				repairToolInput(tu.Input, fields)
+			}
 			if original, ok := nameMap[tu.Name]; ok {
 				tu.Name = original
 			}
@@ -346,8 +342,11 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 	}
 
 	requestConfig := resolveKiroRequestConfig(account, payload.ProfileArn)
-	isAPIKey := config.IsAPIKeyAccount(account)
 	setPayloadOrigin(payload, requestConfig.Origin)
+	prepareKiroPayload(payload)
+	if requestConfig.Wire == kiroWireResponses {
+		return callKiroResponsesAPI(ctx, account, payload, callback, requestConfig)
+	}
 
 	var lastErr error
 	var reqBody []byte
@@ -373,17 +372,14 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 		}
 
 		req.Header.Set("Content-Type", requestConfig.ContentType)
-		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept", "application/vnd.amazon.eventstream")
 		if requestConfig.AmzTarget != "" {
 			req.Header.Set("X-Amz-Target", requestConfig.AmzTarget)
 		}
+		req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 		applyKiroBaseHeaders(req, account, headerValues)
-		if isAPIKey {
-			req.Header.Set("x-amzn-codewhisperer-optout", "false")
-		} else {
-			req.Header.Set("x-amzn-codewhisperer-optout", "true")
-		}
-		req.Header.Set("Amz-Sdk-Request", fmt.Sprintf("attempt=%d; max=%d", streamAttempt, kiroSDKMaxAttempts))
+		req.Header.Set("x-amzn-codewhisperer-optout", "true")
+		req.Header.Set("Amz-Sdk-Request", fmt.Sprintf("attempt=1; max=%d", kiroSDKMaxAttempts))
 		req.Header.Set("Amz-Sdk-Invocation-Id", invocationID)
 
 		resp, err := GetClientForProxy(ResolveAccountProxyURL(account)).Do(req)
@@ -452,49 +448,6 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 		return lastErr
 	}
 	return fmt.Errorf("all endpoints failed")
-}
-
-type kiroRequestConfig struct {
-	URL          string
-	Origin       string
-	ContentType  string
-	AmzTarget    string
-	HeaderValues func(account *config.Account, host string) kiroHeaderValues
-}
-
-func resolveKiroRequestConfig(account *config.Account, profileArn string) kiroRequestConfig {
-	region := kiroRegionForProfile(account, profileArn)
-	authMethod := ""
-	if account != nil {
-		authMethod = strings.ToLower(strings.TrimSpace(account.AuthMethod))
-	}
-
-	// These are credential-specific official surfaces, not fallback routes.
-	// The IDE runtime rejects API_KEY, IDC and external-IdP bearer tokens.
-	if config.IsAPIKeyAccount(account) {
-		return kiroRequestConfig{
-			URL:          fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", region),
-			Origin:       "KIRO_CLI",
-			ContentType:  "application/json",
-			HeaderValues: buildAgentHeaderValues,
-		}
-	}
-	if authMethod == "external_idp" || authMethod == "external-idp" || authMethod == "idc" {
-		return kiroRequestConfig{
-			URL:          regionalizeURLForProfile(kiroCodeWhispererEndpoint, account, profileArn),
-			Origin:       "AI_EDITOR",
-			ContentType:  "application/json",
-			AmzTarget:    kiroCodeWhispererTarget,
-			HeaderValues: buildCodeWhispererHeaderValues,
-		}
-	}
-	return kiroRequestConfig{
-		URL:          fmt.Sprintf("https://runtime.%s.kiro.dev/", region),
-		Origin:       "AI_EDITOR",
-		ContentType:  "application/x-amz-json-1.0",
-		AmzTarget:    kiroRuntimeTarget,
-		HeaderValues: buildGenerateHeaderValues,
-	}
 }
 
 func isRetryableStreamError(err error) bool {

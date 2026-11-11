@@ -366,7 +366,7 @@ func (h *Handler) refreshAllAccounts() {
 	h.pool.Reload()
 }
 
-// validateApiKey 验证 API Key（Bool 包装，旧签名仍被部分调用方使用）
+// validateApiKey validates a request without exposing the matched key entry.
 func (h *Handler) validateApiKey(r *http.Request) bool {
 	_, err := h.authenticate(r)
 	return err == nil
@@ -1448,7 +1448,7 @@ func (h *Handler) recordSuccess(inputTokens, outputTokens int, credits float64) 
 }
 
 // recordSuccessForApiKey is recordSuccess + per-API-key usage attribution.
-// When apiKeyID is empty (legacy single-key path or unauthenticated path), only the
+// When apiKeyID is empty (public mode), only the
 // global usage is updated. Disk persistence is handled by backgroundStatsSaver.
 func (h *Handler) recordSuccessForApiKey(apiKeyID string, inputTokens, outputTokens int, credits float64) {
 	h.recordSuccess(inputTokens, outputTokens, credits)
@@ -2574,6 +2574,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"expiresAt":         a.ExpiresAt,
 			"hasToken":          accountBearerToken(&a) != "",
 			"machineId":         a.MachineId,
+			"machineIdLocked":   a.MachineIdLocked,
+			"kiroEndpoint":      a.KiroEndpoint,
 			"weight":            a.Weight,
 			"overageStatus":     a.OverageStatus,
 			"overageCapability": a.OverageCapability,
@@ -2685,6 +2687,17 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["machineId"].(string); ok {
 		existing.MachineId = v
+		existing.MachineIdLocked = strings.TrimSpace(v) != ""
+	}
+	if v, ok := updates["kiroEndpoint"].(string); ok {
+		switch endpoint := strings.ToLower(strings.TrimSpace(v)); endpoint {
+		case "", "runtime", "q-rest", "q", "responses":
+			existing.KiroEndpoint = endpoint
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "kiroEndpoint must be runtime, q-rest, q, or responses"})
+			return
+		}
 	}
 	if v, ok := updates["weight"].(float64); ok {
 		existing.Weight = int(v)
@@ -2949,7 +2962,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
+	email, _, _ := auth.GetUserInfo(accessToken, refreshToken, region)
 
 	// 创建账号
 	account := config.Account{
@@ -2963,7 +2976,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		Region:       region,
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		Enabled:      true,
-		MachineId:    config.GenerateMachineId(),
+		MachineId:    config.MachineIdForCredentials(refreshToken, ""),
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -3052,7 +3065,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 		Region:        "us-east-1",
 		ExpiresAt:     result.ExpiresAt,
 		Enabled:       true,
-		MachineId:     config.GenerateMachineId(),
+		MachineId:     config.MachineIdForCredentials(result.RefreshToken, ""),
 		TokenEndpoint: result.TokenEndpoint,
 		IssuerURL:     result.IssuerURL,
 		Scopes:        result.Scopes,
@@ -3538,7 +3551,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 授权完成，获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
+	email, _, _ := auth.GetUserInfo(accessToken, refreshToken, region)
 
 	// 创建账号
 	account := config.Account{
@@ -3553,7 +3566,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		Region:       region,
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		Enabled:      true,
-		MachineId:    config.GenerateMachineId(),
+		MachineId:    config.MachineIdForCredentials(refreshToken, ""),
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -3608,7 +3621,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 获取用户信息
-		email, _, _ := auth.GetUserInfo(accessToken)
+		email, _, _ := auth.GetUserInfo(accessToken, refreshToken, req.Region)
 
 		// 创建账号
 		account := config.Account{
@@ -3622,7 +3635,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 			Region:       req.Region,
 			ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 			Enabled:      true,
-			MachineId:    config.GenerateMachineId(),
+			MachineId:    config.MachineIdForCredentials(refreshToken, ""),
 		}
 
 		if err := config.AddAccount(account); err != nil {
@@ -3911,7 +3924,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		if tokenUserID != "" {
 			userID = tokenUserID
 		}
-	} else if tokenEmail, _, _ := auth.GetUserInfo(accessToken); tokenEmail != "" {
+	} else if tokenEmail, _, _ := auth.GetUserInfo(accessToken, req.RefreshToken, req.Region); tokenEmail != "" {
 		email = tokenEmail
 	}
 
@@ -3969,7 +3982,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		Region:                  req.Region,
 		ExpiresAt:               expiresAt,
 		Enabled:                 true,
-		MachineId:               config.GenerateMachineId(),
+		MachineId:               config.MachineIdForCredentials(req.RefreshToken, ""),
 		ProfileArn:              profileARN,
 		TokenEndpoint:           req.TokenEndpoint,
 		IssuerURL:               req.IssuerURL,
@@ -4016,7 +4029,6 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":                  config.GetApiKey(),
 		"requireApiKey":           config.IsApiKeyRequired(),
 		"port":                    config.GetPort(),
 		"host":                    config.GetHost(),
@@ -4072,7 +4084,6 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey                  *string                    `json:"apiKey,omitempty"`
 		RequireApiKey           *bool                      `json:"requireApiKey,omitempty"`
 		Password                string                     `json:"password,omitempty"`
 		AllowOverUsage          *bool                      `json:"allowOverUsage,omitempty"`
@@ -4108,7 +4119,7 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := config.UpdateSettingsPatch(req.ApiKey, req.RequireApiKey, req.Password, req.ModelCooldownSeconds, req.MaxAccountRetryAttempts); err != nil {
+	if err := config.UpdateSettingsPatch(req.RequireApiKey, req.Password, req.ModelCooldownSeconds, req.MaxAccountRetryAttempts); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -4392,6 +4403,8 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"scopes":            account.Scopes,
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
+		"machineIdLocked":   account.MachineIdLocked,
+		"kiroEndpoint":      account.KiroEndpoint,
 		"weight":            account.Weight,
 		"overageStatus":     account.OverageStatus,
 		"overageCapability": account.OverageCapability,

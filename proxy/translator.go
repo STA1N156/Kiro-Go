@@ -158,7 +158,7 @@ func buildAdditionalModelRequestFields(model string, option *kiroReasoningOption
 	}
 
 	if path == "reasoning" {
-		effort := normalizeGPTeffort(option.Effort)
+		effort := normalizeReasoningEffort(model, option.Effort)
 		if option.Disabled || effort == "" {
 			return nil
 		}
@@ -166,27 +166,23 @@ func buildAdditionalModelRequestFields(model string, option *kiroReasoningOption
 	}
 
 	if option.Disabled {
-		if isClaude55(model) {
-			return map[string]interface{}{
-				"thinking":      ClaudeThinkingConfig{Type: "adaptive", Display: normalizeReasoningDisplay(option.Display)},
-				"output_config": map[string]string{"effort": "low"},
-			}
-		}
-		return map[string]interface{}{"thinking": ClaudeThinkingConfig{Type: "disabled"}}
+		return nil
 	}
 
-	effort := normalizeClaudeEffort(option.Effort)
+	effort := normalizeClaudeEffort(model, option.Effort)
 	if effort == "" {
 		effort = "high"
 	}
 	return map[string]interface{}{
-		"thinking":      ClaudeThinkingConfig{Type: "adaptive", Display: normalizeReasoningDisplay(option.Display)},
 		"output_config": map[string]string{"effort": effort},
 	}
 }
 
 func kiroEffortPath(model string) string {
 	normalized := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(normalized, "kimi-k3") {
+		return "reasoning"
+	}
 	gptNormalized := strings.NewReplacer("-", ".", "_", ".").Replace(normalized)
 	if strings.Contains(gptNormalized, "gpt.5.6") {
 		return "reasoning"
@@ -212,21 +208,29 @@ func kiroEffortPath(model string) string {
 	return "output_config"
 }
 
-func isClaude55(model string) bool {
-	return strings.EqualFold(model, "claude-opus-5.5") || strings.EqualFold(model, "claude-sonnet-5.5")
-}
-
-func normalizeClaudeEffort(effort string) string {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
+func normalizeClaudeEffort(model, effort string) string {
+	normalized := strings.ToLower(strings.TrimSpace(effort))
+	switch normalized {
 	case "minimal", "low":
-		return "low"
+		normalized = "low"
 	case "medium":
-		return "medium"
-	case "high", "xhigh", "max":
-		return "high"
+		normalized = "medium"
+	case "high":
+		normalized = "high"
+	case "xhigh":
+		normalized = "xhigh"
+	case "max":
+		normalized = "max"
 	default:
 		return ""
 	}
+	if normalized == "xhigh" {
+		match := kiroEffortModelPattern.FindStringSubmatch(strings.ToLower(model))
+		if len(match) > 2 && match[1] == "4" && match[2] == "6" {
+			return "high"
+		}
+	}
+	return normalized
 }
 
 func normalizeReasoningDisplay(display string) string {
@@ -238,16 +242,31 @@ func normalizeReasoningDisplay(display string) string {
 	}
 }
 
-func normalizeGPTeffort(effort string) string {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
+func normalizeReasoningEffort(model, effort string) string {
+	normalized := strings.ToLower(strings.TrimSpace(effort))
+	if strings.Contains(strings.ToLower(model), "kimi-k3") {
+		switch normalized {
+		case "minimal", "low", "medium":
+			return "low"
+		case "high", "xhigh":
+			return "high"
+		case "max":
+			return "max"
+		default:
+			return ""
+		}
+	}
+	switch normalized {
 	case "minimal", "low":
 		return "low"
 	case "medium":
 		return "medium"
 	case "high":
 		return "high"
-	case "xhigh", "max":
+	case "xhigh":
 		return "xhigh"
+	case "max":
+		return "max"
 	default:
 		return ""
 	}
@@ -449,7 +468,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	}
 
 	// 转换工具
-	kiroTools, toolNameMap := convertClaudeTools(req.Tools)
+	kiroTools, toolNameMap, toolRepairFields := convertClaudeTools(req.Tools)
 
 	// 构建 payload
 	payload := &KiroPayload{
@@ -457,6 +476,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		AdditionalModelRequestFields: buildAdditionalModelRequestFields(modelID, claudeReasoningOption(req, thinking)),
 	}
 	payload.ToolNameMap = toolNameMap
+	payload.ToolRepairFields = toolRepairFields
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstClaudeConversationAnchor(req.Messages))
@@ -485,14 +505,6 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	if len(history) > 0 {
 		payload.ConversationState.History = history
-	}
-
-	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 {
-		payload.InferenceConfig = &InferenceConfig{
-			MaxTokens:   req.MaxTokens,
-			Temperature: req.Temperature,
-			TopP:        req.TopP,
-		}
 	}
 
 	return payload
@@ -884,13 +896,14 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse, 
 	return text, toolUses, reasoning
 }
 
-func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]string) {
+func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]string, map[string]map[string]bool) {
 	if len(tools) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	nameMap := make(map[string]string)
+	repairFields := make(map[string]map[string]bool)
 	for _, tool := range tools {
 		// Anthropic native server tools (web_search_*) are executed by this proxy
 		// via the MCP endpoint, not by generateAssistantResponse. Do not forward
@@ -913,6 +926,9 @@ func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]strin
 		w.ToolSpecification.Name = name
 		w.ToolSpecification.Description = normalizeToolDesc(desc, name)
 		w.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.InputSchema)}
+		if fields := arrayObjectSchemaFields(tool.InputSchema); len(fields) > 0 {
+			repairFields[name] = fields
+		}
 		result = append(result, w)
 	}
 
@@ -938,7 +954,7 @@ func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]strin
 		result = append(result, w)
 	}
 
-	return result, nameMap
+	return result, nameMap, repairFields
 }
 
 func hasNativeWebSearchInTools(tools []ClaudeTool) bool {
@@ -1350,7 +1366,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// 转换工具
-	kiroTools, toolNameMap := convertOpenAITools(req.Tools)
+	kiroTools, toolNameMap, toolRepairFields := convertOpenAITools(req.Tools)
 
 	// 构建 payload
 	payload := &KiroPayload{
@@ -1358,6 +1374,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		AdditionalModelRequestFields: buildAdditionalModelRequestFields(modelID, openAIReasoningOption(req, thinking)),
 	}
 	payload.ToolNameMap = toolNameMap
+	payload.ToolRepairFields = toolRepairFields
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
 	payload.ConversationState.AgentTaskType = "vibe"
@@ -1384,14 +1401,6 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	if len(history) > 0 {
 		payload.ConversationState.History = history
-	}
-
-	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 {
-		payload.InferenceConfig = &InferenceConfig{
-			MaxTokens:   req.MaxTokens,
-			Temperature: req.Temperature,
-			TopP:        req.TopP,
-		}
 	}
 
 	return payload
@@ -1968,41 +1977,28 @@ func parseDataURL(url string) *KiroImage {
 }
 
 func parseBase64Image(data, format string) *KiroImage {
-	format = strings.ToLower(format)
-	if format == "jpg" {
-		format = "jpeg"
+	raw, err := decodeImageBase64(data)
+	if err != nil {
+		return nil
 	}
-
-	// 验证 base64
-	if _, err := base64.StdEncoding.DecodeString(data); err != nil {
-		if _, errRaw := base64.RawStdEncoding.DecodeString(data); errRaw != nil {
-			if _, errURL := base64.URLEncoding.DecodeString(data); errURL != nil {
-				if _, errRawURL := base64.RawURLEncoding.DecodeString(data); errRawURL != nil {
-					return nil
-				}
-			}
-		}
-	}
-
-	if format == "" {
-		format = "png"
-	}
+	format = actualImageFormat(raw, format)
 
 	return &KiroImage{
 		Format: format,
 		Source: struct {
 			Bytes string `json:"bytes"`
-		}{Bytes: data},
+		}{Bytes: base64.StdEncoding.EncodeToString(raw)},
 	}
 }
 
-func convertOpenAITools(tools []OpenAITool) ([]KiroToolWrapper, map[string]string) {
+func convertOpenAITools(tools []OpenAITool) ([]KiroToolWrapper, map[string]string, map[string]map[string]bool) {
 	if len(tools) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	nameMap := make(map[string]string)
+	repairFields := make(map[string]map[string]bool)
 	for _, tool := range tools {
 		if tool.Type != "function" {
 			continue
@@ -2023,9 +2019,12 @@ func convertOpenAITools(tools []OpenAITool) ([]KiroToolWrapper, map[string]strin
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
 		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		if fields := arrayObjectSchemaFields(tool.Function.Parameters); len(fields) > 0 {
+			repairFields[name] = fields
+		}
 		result = append(result, wrapper)
 	}
-	return result, nameMap
+	return result, nameMap, repairFields
 }
 
 // ==================== Kiro -> OpenAI 转换 ====================

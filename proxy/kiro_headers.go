@@ -8,9 +8,8 @@ import (
 )
 
 const (
-	kiroGenerateSDKVersion      = "1.0.0"
-	kiroRuntimeSDKVersion       = "1.0.0"
 	kiroCodeWhispererSDKVersion = "1.0.34"
+	kiroRuntimeSDKVersion       = "1.0.0"
 )
 
 type kiroHeaderValues struct {
@@ -20,46 +19,61 @@ type kiroHeaderValues struct {
 }
 
 func buildGenerateHeaderValues(account *config.Account, host string) kiroHeaderValues {
-	return buildKiroHeaderValues(account, host, "kiroruntime", kiroGenerateSDKVersion, "m/N")
-}
-
-func buildAgentHeaderValues(account *config.Account, host string) kiroHeaderValues {
-	values := buildKiroHeaderValues(account, host, "kiroruntime", kiroGenerateSDKVersion, "m/N")
-	values.UserAgent = strings.Replace(values.UserAgent, " KiroIDE-"+config.GetKiroClientConfig().KiroVersion, " KiroAgent-0.1.0", 1)
-	values.AmzUserAgent = "aws-sdk-js/" + kiroGenerateSDKVersion + " KiroAgent-0.1.0"
-	return values
+	clientCfg := config.GetKiroClientConfig()
+	version := config.KiroVersionForAccount(account)
+	return buildKiroHeaderValues(
+		account,
+		host,
+		"codewhispererstreaming",
+		clientCfg.StreamingSDK,
+		"",
+		"KiroIDE",
+		version,
+	)
 }
 
 func buildCodeWhispererHeaderValues(account *config.Account, host string) kiroHeaderValues {
-	return buildKiroHeaderValues(account, host, "codewhispererstreaming", kiroCodeWhispererSDKVersion, "m/E")
+	return buildKiroHeaderValues(
+		account,
+		host,
+		"codewhispererstreaming",
+		kiroCodeWhispererSDKVersion,
+		"m/E",
+		"KiroIDE",
+		config.KiroVersionForAccount(account),
+	)
 }
 
-func buildRuntimeHeaderValues(account *config.Account, host string) kiroHeaderValues {
-	return buildKiroHeaderValues(account, host, "codewhispererruntime", kiroRuntimeSDKVersion, "m/N,E")
-}
-
-func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, mode string) kiroHeaderValues {
+func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, mode, clientName, version string) kiroHeaderValues {
 	clientCfg := config.GetKiroClientConfig()
 	machineID := ""
 	if account != nil {
-		machineID = account.MachineId
+		machineID = config.EffectiveMachineId(account)
 	}
 
 	userAgent := fmt.Sprintf(
-		"aws-sdk-js/%s ua/2.1 os/%s lang/js md/nodejs#%s api/%s#%s %s KiroIDE-%s",
+		"aws-sdk-js/%s ua/2.1 os/%s lang/js md/nodejs#%s api/%s#%s",
 		sdkVersion,
 		clientCfg.SystemVersion,
-		clientCfg.NodeVersion,
+		config.KiroNodeVersionForAccount(account),
 		apiName,
 		sdkVersion,
-		mode,
-		clientCfg.KiroVersion,
 	)
-	amzUserAgent := fmt.Sprintf("aws-sdk-js/%s KiroIDE-%s", sdkVersion, clientCfg.KiroVersion)
-	if machineID != "" {
-		userAgent += "-" + machineID
-		amzUserAgent += "-" + machineID
+	if mode != "" {
+		userAgent += " " + mode
 	}
+	amzIdentity := clientName
+	if strings.HasPrefix(clientName, "KiroIDE") {
+		identity := clientName + "-" + version
+		if machineID != "" {
+			identity += "-" + machineID
+		}
+		userAgent += " " + identity
+		amzIdentity = identity
+	} else {
+		userAgent += " " + clientName
+	}
+	amzUserAgent := fmt.Sprintf("aws-sdk-js/%s %s", sdkVersion, amzIdentity)
 
 	return kiroHeaderValues{
 		UserAgent:    userAgent,
@@ -80,10 +94,12 @@ func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kir
 	req.Header.Del("tokentype")
 	if account != nil {
 		if config.IsAPIKeyAccount(account) {
-			// Upstream accepts either casing; CLI captures use lowercase "tokentype".
-			req.Header.Set("tokentype", "API_KEY")
+			req.Header.Set("TokenType", "API_KEY")
 		} else if strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp") {
 			req.Header.Set("TokenType", "EXTERNAL_IDP")
+		}
+		if strings.EqualFold(strings.TrimSpace(account.Provider), "internal") {
+			req.Header.Set("redirect-for-internal", "true")
 		}
 	}
 	req.Header.Set("User-Agent", values.UserAgent)
@@ -91,6 +107,41 @@ func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kir
 	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 	if values.Host != "" {
 		req.Host = values.Host
+	}
+}
+
+func applyKiroResponsesHeaders(req *http.Request, account *config.Account, profileArn string) {
+	clientCfg := config.GetKiroClientConfig()
+	token := accountBearerToken(account)
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("x-amzn-kiro-origin", "AI_EDITOR")
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	if strings.TrimSpace(profileArn) != "" {
+		req.Header.Set("x-amzn-kiro-profile", strings.TrimSpace(profileArn))
+	}
+	if account != nil {
+		if config.IsAPIKeyAccount(account) {
+			req.Header.Set("TokenType", "API_KEY")
+		} else if strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp") {
+			req.Header.Set("TokenType", "EXTERNAL_IDP")
+		}
+		if strings.EqualFold(strings.TrimSpace(account.Provider), "internal") {
+			req.Header.Set("redirect-for-internal", "true")
+		}
+	}
+	machineID := config.EffectiveMachineId(account)
+	req.Header.Set(
+		"User-Agent",
+		fmt.Sprintf("KiroIDE %s %s KAS/0.66.89 acp-client/kiro-ide", clientCfg.ResponsesVersion, machineID),
+	)
+	req.Header.Set("x-amzn-kiro-attempt", "1;max=3")
+	req.Header.Set("x-amzn-kiro-fallback", "0;max=0")
+	req.Header.Set("Connection", "close")
+	if req.URL != nil {
+		req.Host = req.URL.Host
 	}
 }
 

@@ -18,6 +18,8 @@ Nếu dự án này hữu ích với bạn, một Star sẽ rất có ý nghĩa.
 - Nhiều cách xác thực: AWS Builder ID, IAM Identity Center (Enterprise SSO), Microsoft Enterprise SSO, SSO Token, cache cục bộ, credentials JSON, Kiro API Key
 - Theo dõi mức dùng, nhập/xuất tài khoản, đa ngôn ngữ (CN / EN / VI)
 - Hỗ trợ cấu hình proxy ra ngoài (SOCKS5 / HTTP)
+- Dấu vân tay thiết bị và proxy ra ngoài nhất quán theo thông tin đăng nhập; phiên bản client, endpoint, dạng gói tin và header được quản lý như một bộ hoàn chỉnh
+- Nén ảnh theo giới hạn upstream, sửa MIME thực, hạ cấp tool Schema quá lớn và sửa tham số công cụ bị mã hóa hai lần
 
 ## Bắt đầu nhanh
 
@@ -109,7 +111,7 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
   -d '{"kiroApiKey":"ksk_your_key|us-east-1","authMethod":"api_key","nickname":"cli-key"}'
 ```
 
-Tài khoản OAuth social và Builder ID dùng giao thức Kiro IDE hiện tại: `POST https://runtime.{region}.kiro.dev/` với `x-amz-target: KiroRuntimeService.GenerateAssistantResponse`. API Key dùng bề mặt Amazon Q với `tokentype: API_KEY`; IAM Identity Center và external IdP dùng bề mặt CodeWhisperer. Mỗi loại thông tin đăng nhập đi qua máy chủ xác thực đúng loại token thay vì gửi mọi tài khoản qua IDE gateway.
+Mặc định dùng hồ sơ Kiro IDE `1.0.212`: `POST https://runtime.{region}.kiro.dev/generateAssistantResponse` với `Content-Type: application/json` cùng đầy đủ header Event Stream, agent-mode, SDK và thiết bị. Mỗi tài khoản có thể chọn `runtime`, `q-rest`, `q` hoặc `responses`; `responses` chuyển sang Kiro IDE `1.4.121` với body, stream và header riêng của `/v1/responses`. Phiên bản client, user agent, endpoint và dạng gói tin luôn chuyển cùng nhau như một bộ dấu vân tay thống nhất.
 
 ## Chế độ Thinking
 

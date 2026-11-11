@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // oidcTokenURL 构造 idc/builderId 刷新 endpoint。测试可替换以拦截网络调用。
@@ -18,8 +20,11 @@ var oidcTokenURL = func(region string) string {
 }
 
 // socialTokenURL 构造 social 刷新 endpoint。测试可替换以拦截网络调用。
-var socialTokenURL = func() string {
-	return "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
+var socialTokenURL = func(region string) string {
+	if strings.TrimSpace(region) == "" {
+		region = "us-east-1"
+	}
+	return fmt.Sprintf("https://prod.%s.auth.desktop.kiro.dev/refreshToken", region)
 }
 
 // RefreshToken 刷新 access token
@@ -50,32 +55,38 @@ func RefreshTokenContext(ctx context.Context, account *config.Account) (string, 
 		)
 	}
 	if account.AuthMethod == "social" {
-		return refreshSocialToken(ctx, account.RefreshToken, client)
+		return refreshSocialToken(ctx, account, client)
 	}
-	return refreshOIDCToken(ctx, account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
+	return refreshOIDCToken(ctx, account, client)
 }
 
 // refreshOIDCToken IdC/Builder ID token 刷新
-func refreshOIDCToken(ctx context.Context, refreshToken, clientID, clientSecret, region string, client *http.Client) (string, string, int64, string, error) {
-	if clientID == "" || clientSecret == "" {
+func refreshOIDCToken(ctx context.Context, account *config.Account, client *http.Client) (string, string, int64, string, error) {
+	if account.ClientID == "" || account.ClientSecret == "" {
 		return "", "", 0, "", fmt.Errorf("OIDC refresh requires clientId and clientSecret")
 	}
+	region := account.Region
 	if region == "" {
 		region = "us-east-1"
 	}
 
 	url := oidcTokenURL(region)
 
-	payload := map[string]string{
-		"clientId":     clientID,
-		"clientSecret": clientSecret,
-		"refreshToken": refreshToken,
-		"grantType":    "refresh_token",
+	payload := struct {
+		ClientID     string `json:"clientId"`
+		ClientSecret string `json:"clientSecret"`
+		RefreshToken string `json:"refreshToken"`
+		GrantType    string `json:"grantType"`
+	}{
+		ClientID:     account.ClientID,
+		ClientSecret: account.ClientSecret,
+		RefreshToken: account.RefreshToken,
+		GrantType:    "refresh_token",
 	}
 
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	applyKiroIDCRefreshHeaders(req, region, account)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -104,16 +115,16 @@ func refreshOIDCToken(ctx context.Context, refreshToken, clientID, clientSecret,
 }
 
 // refreshSocialToken Social (GitHub/Google) token 刷新
-func refreshSocialToken(ctx context.Context, refreshToken string, client *http.Client) (string, string, int64, string, error) {
-	url := socialTokenURL()
+func refreshSocialToken(ctx context.Context, account *config.Account, client *http.Client) (string, string, int64, string, error) {
+	url := socialTokenURL(account.Region)
 
-	payload := map[string]string{
-		"refreshToken": refreshToken,
-	}
+	payload := struct {
+		RefreshToken string `json:"refreshToken"`
+	}{RefreshToken: account.RefreshToken}
 
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	applyKiroSocialRefreshHeaders(req, config.EffectiveMachineId(account), account)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -139,4 +150,38 @@ func refreshSocialToken(ctx context.Context, refreshToken string, client *http.C
 
 	expiresAt := time.Now().Unix() + int64(result.ExpiresIn)
 	return result.AccessToken, result.RefreshToken, expiresAt, result.ProfileArn, nil
+}
+
+func applyKiroIDCRefreshHeaders(req *http.Request, region string, account *config.Account) {
+	clientCfg := config.GetKiroClientConfig()
+	const identitySDK = "3.980.0"
+	version := config.KiroVersionForAccount(account)
+	req.Header.Set("Content-Type", "application/json")
+	if region != "" {
+		req.Host = fmt.Sprintf("oidc.%s.amazonaws.com", region)
+	}
+	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.NewString())
+	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=4")
+	req.Header.Set("Connection", "close")
+	req.Header.Set("X-Amz-User-Agent", "aws-sdk-js/"+identitySDK+" KiroIDE-"+version)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set(
+		"User-Agent",
+		fmt.Sprintf(
+			"aws-sdk-js/%s ua/2.1 os/%s lang/js md/nodejs#%s m/E",
+			identitySDK,
+			clientCfg.SystemVersion,
+			config.KiroNodeVersionForAccount(account),
+		),
+	)
+}
+
+func applyKiroSocialRefreshHeaders(req *http.Request, machineID string, account *config.Account) {
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "KiroIDE-"+config.KiroVersionForAccount(account)+"-"+machineID)
+	req.Header.Set("Connection", "close")
+	if req.URL != nil {
+		req.Host = req.URL.Host
+	}
 }

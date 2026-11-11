@@ -1285,6 +1285,14 @@
       '<button class="btn btn-sm btn-primary" data-detail-action="saveMachineId" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div></div>' +
 
+      '<div class="detail-section"><h4>' + escapeHtml(t('detail.kiroEndpoint')) + '</h4>' +
+      '<div class="machine-id-row">' +
+      '<select id="kiroEndpointInput">' +
+      ['', 'runtime', 'q-rest', 'q', 'responses'].map(v => '<option value="' + v + '"' + ((a.kiroEndpoint || '') === v ? ' selected' : '') + '>' + (v || t('detail.kiroEndpointDefault')) + '</option>').join('') +
+      '</select>' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveKiroEndpoint" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '</div></div>' +
+
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.weight')) + '</h4>' +
       '<div class="form-group">' +
       '<input type="number" id="weightInput" value="' + (a.weight || 0) + '" min="0" max="10" />' +
@@ -1393,10 +1401,13 @@
   }
   async function saveMachineId(id) {
     const m = $('machineIdInput').value.trim();
-    if (m && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(m) && !/^[0-9a-f]{32}$/i.test(m)) {
+    if (m && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(m) && !/^[0-9a-f]{32}$/i.test(m) && !/^[0-9a-f]{64}$/i.test(m)) {
       toast(t('detail.machineIdError'), 'warning'); return;
     }
     await putAccount(id, { machineId: m }, t('detail.saved'));
+  }
+  async function saveKiroEndpoint(id) {
+    await putAccount(id, { kiroEndpoint: $('kiroEndpointInput').value }, t('detail.saved'));
   }
   async function saveWeight(id) {
     const weight = parseInt($('weightInput').value, 10) || 0;
@@ -1886,9 +1897,6 @@
       const id = escapeAttr(item.id || '');
       const name = item.name ? escapeHtml(item.name) : '<span class="muted-text">' + escapeHtml(t('apiKeys.unnamed')) + '</span>';
       const masked = escapeHtml(item.keyMasked || '');
-      const migrated = item.migrated
-        ? '<span class="text-xs" style="background:rgba(59,130,246,0.15);color:#3b82f6;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.migrated')) + '</span>'
-        : '';
       const disabled = !item.enabled
         ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.disabled')) + '</span>'
         : '';
@@ -1899,7 +1907,6 @@
         '<div class="flex items-center gap-2" style="flex-wrap:wrap;justify-content:space-between;">' +
           '<div class="flex items-center gap-2" style="flex-wrap:wrap;">' +
             '<span class="font-semibold">' + name + '</span>' +
-            migrated +
             disabled +
             '<span class="text-xs muted-text font-mono">' + masked + '</span>' +
           '</div>' +
@@ -3409,6 +3416,7 @@
       const id = b.dataset.id;
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
+      else if (a === 'saveKiroEndpoint') saveKiroEndpoint(id);
       else if (a === 'saveWeight') saveWeight(id);
       else if (a === 'toggleOverage') toggleOverageSwitch(id, b);
       else if (a === 'refreshOverage') refreshAccountOverage(id);

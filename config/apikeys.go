@@ -73,7 +73,6 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 //   - Enabled, TokenLimit, CreditLimit are always overwritten (zero values are valid).
 //   - Counters (TokensUsed/CreditsUsed/RequestsCount) are not touched here; use
 //     RecordApiKeyUsage or ResetApiKeyUsage instead.
-//   - Migrated stays as-is once true; only flips when explicitly set in patch.
 func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -106,9 +105,6 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	cfg.ApiKeys[idx].Enabled = patch.Enabled
 	cfg.ApiKeys[idx].TokenLimit = patch.TokenLimit
 	cfg.ApiKeys[idx].CreditLimit = patch.CreditLimit
-	if patch.Migrated {
-		cfg.ApiKeys[idx].Migrated = true
-	}
 	return saveLocked()
 }
 

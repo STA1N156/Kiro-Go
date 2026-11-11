@@ -18,6 +18,8 @@ If this project helps you, a Star would mean a lot.
 - Multiple auth: AWS Builder ID, IAM Identity Center (Enterprise SSO), Microsoft Enterprise SSO, SSO Token, local cache, credentials JSON, Kiro API Key
 - Usage tracking, account import/export, i18n (CN / EN / VI)
 - Support configuring outbound proxy (SOCKS5 / HTTP)
+- Credential-consistent device fingerprint and egress proxy, with client version, endpoint, wire shape, and headers managed as one profile
+- Upstream-safe image resizing with real MIME detection, oversized tool-schema downgrade, and double-encoded tool argument repair
 
 ## Quick Start
 
@@ -109,7 +111,7 @@ curl -X POST http://localhost:8080/admin/api/auth/credentials \
   -d '{"kiroApiKey":"ksk_your_key|us-east-1","authMethod":"api_key","nickname":"cli-key"}'
 ```
 
-OAuth social and Builder ID accounts use the current Kiro IDE transport: `POST https://runtime.{region}.kiro.dev/` with `x-amz-target: KiroRuntimeService.GenerateAssistantResponse`. API Key accounts use the Amazon Q generation surface with `tokentype: API_KEY`; IAM Identity Center and external IdP accounts use the CodeWhisperer surface. This keeps each credential on the host that validates its token type instead of sending every account through the IDE gateway.
+The default is the Kiro IDE `1.0.212` profile: `POST https://runtime.{region}.kiro.dev/generateAssistantResponse` with `Content-Type: application/json` and the complete Event Stream, agent-mode, SDK, and device headers. Each account can select `runtime`, `q-rest`, `q`, or `responses`; `responses` switches to Kiro IDE `1.4.121` with the native `/v1/responses` body, stream, and headers. Client version, user agents, endpoint, and wire shape always switch as one coherent fingerprint.
 
 ## Thinking Mode
 

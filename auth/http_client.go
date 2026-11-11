@@ -55,8 +55,6 @@ func buildAuthTransport(proxyURL string) *http.Transport {
 			t.Proxy = http.ProxyURL(u)
 			t.ForceAttemptHTTP2 = false
 		}
-	} else {
-		t.Proxy = http.ProxyFromEnvironment
 	}
 	return t
 }
