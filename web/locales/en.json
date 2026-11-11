@@ -132,7 +132,7 @@
   "settings.overUsageSaved": "Over-usage settings saved",
   "settings.thinkingSettings": "Thinking Mode Settings",
   "settings.thinkingSuffix": "Trigger Suffix",
-  "settings.thinkingSuffixHint": "Add this suffix to model name to enable thinking mode, e.g. claude-sonnet-4.5-thinking",
+  "settings.thinkingSuffixHint": "Add this suffix to enable thinking, e.g. claude-sonnet-4.5-thinking; -thinking and -reasoning are always supported",
   "settings.openaiFormat": "OpenAI API Output Format",
   "settings.claudeFormat": "Claude API Output Format",
   "settings.noTag": "Direct output (no tag)",

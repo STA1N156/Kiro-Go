@@ -132,7 +132,7 @@
   "settings.overUsageSaved": "超额使用设置已保存",
   "settings.thinkingSettings": "Thinking 模式设置",
   "settings.thinkingSuffix": "触发后缀",
-  "settings.thinkingSuffixHint": "模型名称加此后缀即启用思考模式，如 claude-sonnet-4.5-thinking",
+  "settings.thinkingSuffixHint": "模型名称加此后缀即启用思考模式，如 claude-sonnet-4.5-thinking；-thinking 和 -reasoning 始终可用",
   "settings.openaiFormat": "OpenAI API 输出格式",
   "settings.claudeFormat": "Claude API 输出格式",
   "settings.noTag": "直接输出 (无标签)",

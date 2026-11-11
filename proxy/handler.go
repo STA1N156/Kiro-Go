@@ -520,11 +520,11 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		h.modelsCacheMu.RUnlock()
 	}
 
-	thinkingSuffix := config.GetThinkingConfig().Suffix
+	suffixes := thinkingSuffixes(config.GetThinkingConfig().Suffix)
 
-	models := buildAnthropicModelsResponse(cached, thinkingSuffix)
+	models := buildAnthropicModelsResponse(cached, suffixes)
 	if len(models) == 0 {
-		models = fallbackAnthropicModels(thinkingSuffix)
+		models = fallbackAnthropicModels(suffixes)
 	}
 
 	// 添加别名模型
@@ -542,40 +542,42 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []map[string]interface{} {
+func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffixes []string) []map[string]interface{} {
 	if len(cached) == 0 {
 		return nil
 	}
 
-	models := make([]map[string]interface{}, 0, len(cached)*2)
+	models := make([]map[string]interface{}, 0, len(cached)*(1+len(thinkingSuffixes)))
 	if len(cached) > 0 {
 		for _, m := range cached {
 			supportsImage := modelSupportsImage(m.InputTypes)
 			models = append(models, buildModelInfo(m.ModelId, "anthropic", supportsImage))
-			// 自动生成 thinking 变体
-			models = append(models, buildModelInfo(m.ModelId+thinkingSuffix, "anthropic", supportsImage))
+			for _, suffix := range thinkingSuffixes {
+				models = append(models, buildModelInfo(m.ModelId+suffix, "anthropic", supportsImage))
+			}
 		}
 	}
 	return models
 }
 
-func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
-	return []map[string]interface{}{
-		buildModelInfo("claude-sonnet-4.6", "anthropic", true),
-		buildModelInfo("claude-sonnet-4.6"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-opus-4.6", "anthropic", true),
-		buildModelInfo("claude-opus-4.6"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-opus-4.7", "anthropic", true),
-		buildModelInfo("claude-opus-4.7"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-sonnet-4.5", "anthropic", true),
-		buildModelInfo("claude-sonnet-4.5"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-sonnet-4", "anthropic", true),
-		buildModelInfo("claude-sonnet-4"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-haiku-4.5", "anthropic", true),
-		buildModelInfo("claude-haiku-4.5"+thinkingSuffix, "anthropic", true),
-		buildModelInfo("claude-opus-4.5", "anthropic", true),
-		buildModelInfo("claude-opus-4.5"+thinkingSuffix, "anthropic", true),
+func fallbackAnthropicModels(thinkingSuffixes []string) []map[string]interface{} {
+	base := []string{
+		"claude-sonnet-4.6",
+		"claude-opus-4.6",
+		"claude-opus-4.7",
+		"claude-sonnet-4.5",
+		"claude-sonnet-4",
+		"claude-haiku-4.5",
+		"claude-opus-4.5",
 	}
+	models := make([]map[string]interface{}, 0, len(base)*(1+len(thinkingSuffixes)))
+	for _, id := range base {
+		models = append(models, buildModelInfo(id, "anthropic", true))
+		for _, suffix := range thinkingSuffixes {
+			models = append(models, buildModelInfo(id+suffix, "anthropic", true))
+		}
+	}
+	return models
 }
 
 func modelSupportsImage(inputTypes []string) bool {

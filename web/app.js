@@ -3607,13 +3607,13 @@
   }
 
   function renderModelsView(container, models) {
-    const thinkingSuffix = '-thinking';
+    const thinkingSuffixes = ['-thinking', '-reasoning'];
     let html = '<div class="api-view-toolbar">';
     html += '<span class="api-view-count">' + escapeHtml(t('api.totalModels').replace('{count}', models.length)) + '</span>';
     html += '<input type="text" class="api-view-search" id="modelsSearchInput" placeholder="' + escapeAttr(t('api.searchModels')) + '" />';
     html += '</div>';
     html += '<div id="modelsGridContainer">';
-    html += buildModelsGroupedHtml(models, thinkingSuffix);
+    html += buildModelsGroupedHtml(models, thinkingSuffixes);
     html += '</div>';
     container.innerHTML = html;
 
@@ -3622,7 +3622,7 @@
       searchInput.addEventListener('input', () => {
         const kw = searchInput.value.toLowerCase().trim();
         const filtered = kw ? models.filter(m => (m.id || '').toLowerCase().includes(kw) || (m.owned_by || '').toLowerCase().includes(kw)) : models;
-        $('modelsGridContainer').innerHTML = buildModelsGroupedHtml(filtered, thinkingSuffix);
+        $('modelsGridContainer').innerHTML = buildModelsGroupedHtml(filtered, thinkingSuffixes);
       });
     }
   }
@@ -3691,7 +3691,7 @@
     return colors[family] || '#6b7280';
   }
 
-  function buildModelsGroupedHtml(models, thinkingSuffix) {
+  function buildModelsGroupedHtml(models, thinkingSuffixes) {
     if (models.length === 0) {
       return '<div class="api-view-loading">' + escapeHtml(t('api.noModels')) + '</div>';
     }
@@ -3723,7 +3723,7 @@
 
       for (const m of familyModels) {
         const id = m.id || '';
-        const isThinking = id.endsWith(thinkingSuffix);
+        const isThinking = thinkingSuffixes.some(suffix => id.toLowerCase().endsWith(suffix));
         const supportsImage = m.supports_image || false;
 
         html += '<div class="model-item">';

@@ -132,7 +132,7 @@
   "settings.overUsageSaved": "Đã lưu cài đặt dùng vượt hạn",
   "settings.thinkingSettings": "Cài đặt chế độ Thinking",
   "settings.thinkingSuffix": "Hậu tố kích hoạt",
-  "settings.thinkingSuffixHint": "Thêm hậu tố này vào tên mô hình để bật chế độ suy nghĩ, ví dụ claude-sonnet-4.5-thinking",
+  "settings.thinkingSuffixHint": "Thêm hậu tố này để bật chế độ suy nghĩ, ví dụ claude-sonnet-4.5-thinking; -thinking và -reasoning luôn được hỗ trợ",
   "settings.openaiFormat": "Định dạng đầu ra OpenAI API",
   "settings.claudeFormat": "Định dạng đầu ra Claude API",
   "settings.noTag": "Xuất trực tiếp (không thẻ)",

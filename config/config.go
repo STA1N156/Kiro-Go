@@ -256,7 +256,7 @@ type Config struct {
 	MaxAccountRetryAttempts int             `json:"maxAccountRetryAttempts,omitempty"`
 
 	// Thinking mode configuration for extended reasoning output
-	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
+	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Custom thinking suffix; -thinking and -reasoning are always supported
 	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
 	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
 
