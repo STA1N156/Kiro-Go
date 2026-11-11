@@ -41,7 +41,7 @@ const (
 )
 
 var (
-	errEmptyKiroStream         = errors.New("该内容违反Anthropic相关条款限制，无法继续进行，可切换至非Opus5/5.5模型，详情参考https://support.claude.com/zh-CN/articles/16049681")
+	errEmptyKiroStream         = errors.New("该请求内容违反了Anthropic相关条款限制，可能涉及了生物安全/网络安全/模型越狱等内容，无法继续进行，请切换至非Opus 5/5.5模型，详情参考https://support.claude.com/zh-CN/articles/16049681")
 	errIncompleteKiroToolInput = errors.New("upstream stream ended with incomplete tool input")
 	streamRetryWait            = waitForStreamRetry
 )

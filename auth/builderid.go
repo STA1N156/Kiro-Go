@@ -21,6 +21,7 @@ type BuilderIdSession struct {
 	Interval        int
 	ExpiresAt       time.Time
 	Region          string
+	ProxyURL        string
 }
 
 var (
@@ -29,7 +30,7 @@ var (
 )
 
 // StartBuilderIdLogin 开始 Builder ID 登录
-func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
+func StartBuilderIdLogin(region, proxyURL string) (*BuilderIdSession, error) {
 	if region == "" {
 		region = "us-east-1"
 	}
@@ -57,7 +58,7 @@ func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
 	regReq, _ := http.NewRequest("POST", oidcBase+"/client/register", bytes.NewReader(regBody))
 	regReq.Header.Set("Content-Type", "application/json")
 
-	client := httpClient()
+	client := GetAuthClientForProxy(proxyURL)
 	regResp, err := client.Do(regReq)
 	if err != nil {
 		return nil, fmt.Errorf("register client failed: %v", err)
@@ -133,6 +134,7 @@ func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
 		Interval:        authResult.Interval,
 		ExpiresAt:       time.Now().Add(time.Duration(authResult.ExpiresIn) * time.Second),
 		Region:          region,
+		ProxyURL:        proxyURL,
 	}
 
 	builderIdMu.Lock()
@@ -175,7 +177,7 @@ func PollBuilderIdAuth(sessionID string) (accessToken, refreshToken, clientID, c
 	tokenReq, _ := http.NewRequest("POST", oidcBase+"/token", bytes.NewReader(tokenBody))
 	tokenReq.Header.Set("Content-Type", "application/json")
 
-	client := httpClient()
+	client := GetAuthClientForProxy(session.ProxyURL)
 	tokenResp, err := client.Do(tokenReq)
 	if err != nil {
 		return "", "", "", "", "", 0, "", fmt.Errorf("token request failed: %v", err)

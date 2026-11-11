@@ -2508,6 +2508,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetProxy(w, r)
 	case path == "/proxy" && r.Method == "POST":
 		h.apiUpdateProxy(w, r)
+	case path == "/proxy-pool" && r.Method == "GET":
+		h.apiGetProxyPool(w, r)
+	case path == "/proxy-pool" && r.Method == "POST":
+		h.apiAddProxyPool(w, r)
+	case path == "/proxy-pool" && r.Method == "DELETE":
+		h.apiDeleteProxyPool(w, r)
 	case path == "/prompt-filter" && r.Method == "GET":
 		h.apiGetPromptFilter(w, r)
 	case path == "/prompt-filter" && r.Method == "POST":
@@ -2624,6 +2630,14 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if account.Region == "" {
 		account.Region = "us-east-1"
+	}
+	if strings.TrimSpace(account.ProxyURL) == "" {
+		account.ProxyURL = config.AssignAvailableProxy()
+		if account.ProxyURL == "" {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"error": "代理池没有可用代理，请先添加代理"})
+			return
+		}
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -2928,8 +2942,14 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "startUrl is required"})
 		return
 	}
+	proxyURL := config.AssignAvailableProxy()
+	if proxyURL == "" {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "代理池没有可用代理，请先添加代理"})
+		return
+	}
 
-	sessionID, authorizeUrl, expiresIn, err := auth.StartIamSsoLogin(req.StartUrl, req.Region)
+	sessionID, authorizeUrl, expiresIn, err := auth.StartIamSsoLogin(req.StartUrl, req.Region, proxyURL)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -2954,6 +2974,12 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	proxyURL := auth.GetIamSsoProxyURL(req.SessionID)
+	if proxyURL == "" {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "登录会话未绑定代理，请重新开始登录"})
+		return
+	}
 	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, err := auth.CompleteIamSsoLogin(req.SessionID, req.CallbackUrl)
 	if err != nil {
 		w.WriteHeader(400)
@@ -2962,7 +2988,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken, refreshToken, region)
+	email, _, _ := auth.GetUserInfoWithMachineAndProxy(accessToken, refreshToken, region, "", proxyURL)
 
 	// 创建账号
 	account := config.Account{
@@ -2977,6 +3003,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		Enabled:      true,
 		MachineId:    config.MachineIdForCredentials(refreshToken, ""),
+		ProxyURL:     proxyURL,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -2996,7 +3023,13 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiStartMicrosoftSSO(w http.ResponseWriter, r *http.Request) {
-	sessionID, authorizeURL, expiresIn, err := auth.StartMicrosoftSSOLogin()
+	proxyURL := config.AssignAvailableProxy()
+	if proxyURL == "" {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "代理池没有可用代理，请先添加代理"})
+		return
+	}
+	sessionID, authorizeURL, expiresIn, err := auth.StartMicrosoftSSOLogin(proxyURL)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3069,6 +3102,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 		TokenEndpoint: result.TokenEndpoint,
 		IssuerURL:     result.IssuerURL,
 		Scopes:        result.Scopes,
+		ProxyURL:      result.ProxyURL,
 	}
 
 	discoveryContext, discovery, ok := h.beginMicrosoftProfileDiscovery(r.Context(), req.SessionID)
@@ -3500,7 +3534,13 @@ func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request)
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	session, err := auth.StartBuilderIdLogin(req.Region)
+	proxyURL := config.AssignAvailableProxy()
+	if proxyURL == "" {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "代理池没有可用代理，请先添加代理"})
+		return
+	}
+	session, err := auth.StartBuilderIdLogin(req.Region, proxyURL)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3525,6 +3565,13 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	session := auth.GetBuilderIdSession(req.SessionID)
+	if session == nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "登录会话不存在或已过期"})
+		return
+	}
+	proxyURL := session.ProxyURL
 	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, status, err := auth.PollBuilderIdAuth(req.SessionID)
 	if err != nil {
 		w.WriteHeader(400)
@@ -3537,21 +3584,17 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 
 	if status == "pending" || status == "slow_down" {
 		// 获取当前间隔
-		interval := 5
-		if session := auth.GetBuilderIdSession(req.SessionID); session != nil {
-			interval = session.Interval
-		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":   true,
 			"completed": false,
 			"status":    status,
-			"interval":  interval,
+			"interval":  session.Interval,
 		})
 		return
 	}
 
 	// 授权完成，获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken, refreshToken, region)
+	email, _, _ := auth.GetUserInfoWithMachineAndProxy(accessToken, refreshToken, region, "", proxyURL)
 
 	// 创建账号
 	account := config.Account{
@@ -3567,6 +3610,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 		Enabled:      true,
 		MachineId:    config.MachineIdForCredentials(refreshToken, ""),
+		ProxyURL:     proxyURL,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -3614,14 +3658,19 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		accessToken, refreshToken, clientID, clientSecret, expiresIn, err := auth.ImportFromSsoToken(token, req.Region)
+		proxyURL := config.AssignAvailableProxy()
+		if proxyURL == "" {
+			errors = append(errors, "代理池没有可用代理，请先添加代理")
+			break
+		}
+		accessToken, refreshToken, clientID, clientSecret, expiresIn, err := auth.ImportFromSsoTokenWithProxy(token, req.Region, proxyURL)
 		if err != nil {
 			errors = append(errors, err.Error())
 			continue
 		}
 
 		// 获取用户信息
-		email, _, _ := auth.GetUserInfo(accessToken, refreshToken, req.Region)
+		email, _, _ := auth.GetUserInfoWithMachineAndProxy(accessToken, refreshToken, req.Region, "", proxyURL)
 
 		// 创建账号
 		account := config.Account{
@@ -3636,6 +3685,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:    time.Now().Unix() + int64(expiresIn),
 			Enabled:      true,
 			MachineId:    config.MachineIdForCredentials(refreshToken, ""),
+			ProxyURL:     proxyURL,
 		}
 
 		if err := config.AddAccount(account); err != nil {
@@ -3739,6 +3789,12 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	proxyURL := config.AssignAvailableProxy()
+	if proxyURL == "" {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "代理池没有可用代理，请先添加代理"})
+		return
+	}
 
 	// API Key import path: no OAuth refresh, no profileArn.
 	if isAPIKeyImport {
@@ -3754,6 +3810,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			AuthMethod:      "api_key",
 			Provider:        strings.TrimSpace(req.Provider),
 			Region:          strings.TrimSpace(req.Region),
+			ProxyURL:        proxyURL,
 			MachineId:       explicitMachineID,
 			MachineIdLocked: explicitMachineID != "",
 			Enabled:         true,
@@ -3782,8 +3839,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"account": map[string]interface{}{
-				"id":    account.ID,
-				"email": account.Email,
+				"id":       account.ID,
+				"email":    account.Email,
+				"proxyURL": account.ProxyURL,
 			},
 		})
 		return
@@ -3910,6 +3968,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		TokenEndpoint:   req.TokenEndpoint,
 		IssuerURL:       req.IssuerURL,
 		Scopes:          req.Scopes,
+		ProxyURL:        proxyURL,
 		MachineId:       explicitMachineID,
 		MachineIdLocked: explicitMachineID != "",
 	}
@@ -3938,7 +3997,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		if tokenUserID != "" {
 			userID = tokenUserID
 		}
-	} else if tokenEmail, _, _ := auth.GetUserInfoWithMachine(accessToken, req.RefreshToken, req.Region, explicitMachineID); tokenEmail != "" {
+	} else if tokenEmail, _, _ := auth.GetUserInfoWithMachineAndProxy(accessToken, req.RefreshToken, req.Region, explicitMachineID, proxyURL); tokenEmail != "" {
 		email = tokenEmail
 	}
 
@@ -4002,6 +4061,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		TokenEndpoint:           req.TokenEndpoint,
 		IssuerURL:               req.IssuerURL,
 		Scopes:                  req.Scopes,
+		ProxyURL:                proxyURL,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -4013,8 +4073,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"proxyURL": account.ProxyURL,
 		},
 	})
 }
@@ -4608,6 +4669,101 @@ func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 	applyProxyConfig(req.ProxyURL)
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (h *Handler) apiGetProxyPool(w http.ResponseWriter, r *http.Request) {
+	accounts := config.GetAccounts()
+	assignedByProxy := make(map[string]config.Account)
+	for _, account := range accounts {
+		if proxyURL := strings.TrimSpace(account.ProxyURL); proxyURL != "" {
+			assignedByProxy[proxyURL] = account
+		}
+	}
+	pool := config.GetProxyPool()
+	entries := make([]map[string]interface{}, 0, len(pool))
+	assigned := 0
+	for _, proxyURL := range pool {
+		account, inUse := assignedByProxy[proxyURL]
+		if inUse {
+			assigned++
+		}
+		entry := map[string]interface{}{
+			"url":      proxyURL,
+			"display":  maskProxyURL(proxyURL),
+			"assigned": inUse,
+		}
+		if inUse {
+			entry["accountId"] = account.ID
+			entry["email"] = account.Email
+		}
+		entries = append(entries, entry)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total":     len(pool),
+		"assigned":  assigned,
+		"available": len(pool) - assigned,
+		"entries":   entries,
+	})
+}
+
+func (h *Handler) apiAddProxyPool(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Proxies string `json:"proxies"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	proxies, parseErrors := parseProxyPoolInput(req.Proxies)
+	if len(proxies) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":  "No valid proxies found",
+			"errors": parseErrors,
+		})
+		return
+	}
+	added, err := config.AddProxyPoolEntries(proxies)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	total, assigned, available := config.ProxyPoolStats()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"added":     added,
+		"skipped":   len(proxies) - added,
+		"errors":    parseErrors,
+		"total":     total,
+		"assigned":  assigned,
+		"available": available,
+	})
+}
+
+func (h *Handler) apiDeleteProxyPool(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProxyURL string `json:"proxyURL"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if err := config.DeleteProxyPoolEntry(req.ProxyURL); err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	total, assigned, available := config.ProxyPoolStats()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"total":     total,
+		"assigned":  assigned,
+		"available": available,
+	})
 }
 
 // apiGetVersion 获取版本信息

@@ -273,7 +273,9 @@ type Config struct {
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
 	//         "http://host:port",  "http://user:pass@host:port"
 	// Leave empty to connect directly.
-	ProxyURL string `json:"proxyURL,omitempty"`
+	ProxyURL        string   `json:"proxyURL,omitempty"`
+	ProxyPool       []string `json:"proxyPool,omitempty"`
+	ProxyPoolCursor int      `json:"proxyPoolCursor,omitempty"`
 
 	// FilterClaudeCode detects the Claude Code CLI built-in system prompt and replaces it
 	// with a compact backend-only prompt, reducing token usage significantly.
@@ -374,6 +376,9 @@ func loadLocked() error {
 	}
 	if loaded.ModelCooldownSeconds < 0 {
 		loaded.ModelCooldownSeconds = 60
+	}
+	if loaded.ProxyPoolCursor < 0 || loaded.ProxyPoolCursor >= len(loaded.ProxyPool) {
+		loaded.ProxyPoolCursor = 0
 	}
 	cfg = &loaded
 	statsRevision, savedStatsRevision = 0, 0
@@ -681,6 +686,10 @@ func AccountIDExists(id string) bool {
 func AddAccount(account Account) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	previousCursor := 0
+	if cfg != nil {
+		previousCursor = cfg.ProxyPoolCursor
+	}
 	if IsAPIKeyAccount(&account) {
 		if err := NormalizeAPIKeyAccount(&account); err != nil {
 			return err
@@ -715,8 +724,12 @@ func AddAccount(account Account) error {
 		}
 	}
 	cfg.Accounts = append(cfg.Accounts, account)
+	if idx := proxyPoolIndexLocked(account.ProxyURL); idx >= 0 && len(cfg.ProxyPool) > 0 {
+		cfg.ProxyPoolCursor = (idx + 1) % len(cfg.ProxyPool)
+	}
 	if err := Save(); err != nil {
 		cfg.Accounts = cfg.Accounts[:len(cfg.Accounts)-1]
+		cfg.ProxyPoolCursor = previousCursor
 		return err
 	}
 	return nil
@@ -753,9 +766,20 @@ func UpdateAccount(id string, account Account) error {
 				account.RefreshTokenFingerprint = RefreshTokenFingerprint(a.RefreshToken)
 			}
 			previous := cfg.Accounts[i]
+			previousPool := append([]string(nil), cfg.ProxyPool...)
+			previousCursor := cfg.ProxyPoolCursor
+			proxyChanged := strings.TrimSpace(a.ProxyURL) != strings.TrimSpace(account.ProxyURL)
+			if proxyChanged {
+				requeueProxyPoolEntryLocked(a.ProxyURL)
+				if idx := proxyPoolIndexLocked(account.ProxyURL); idx >= 0 && len(cfg.ProxyPool) > 0 {
+					cfg.ProxyPoolCursor = (idx + 1) % len(cfg.ProxyPool)
+				}
+			}
 			cfg.Accounts[i] = account
 			if err := Save(); err != nil {
 				cfg.Accounts[i] = previous
+				cfg.ProxyPool = previousPool
+				cfg.ProxyPoolCursor = previousCursor
 				return err
 			}
 			return nil
@@ -880,8 +904,18 @@ func DeleteAccount(id string) error {
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
+			previousAccounts := append([]Account(nil), cfg.Accounts...)
+			previousPool := append([]string(nil), cfg.ProxyPool...)
+			previousCursor := cfg.ProxyPoolCursor
+			requeueProxyPoolEntryLocked(a.ProxyURL)
 			cfg.Accounts = append(cfg.Accounts[:i], cfg.Accounts[i+1:]...)
-			return Save()
+			if err := Save(); err != nil {
+				cfg.Accounts = previousAccounts
+				cfg.ProxyPool = previousPool
+				cfg.ProxyPoolCursor = previousCursor
+				return err
+			}
+			return nil
 		}
 	}
 	return nil
@@ -1158,6 +1192,192 @@ func UpdateProxySettings(proxyURL string) error {
 	defer cfgLock.Unlock()
 	cfg.ProxyURL = proxyURL
 	return Save()
+}
+
+// GetProxyPool returns a copy of the ordered proxy pool.
+func GetProxyPool() []string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return nil
+	}
+	pool := make([]string, len(cfg.ProxyPool))
+	copy(pool, cfg.ProxyPool)
+	return pool
+}
+
+// ProxyPoolStats reports how many pool entries are assigned to accounts.
+func ProxyPoolStats() (total, assigned, available int) {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return 0, 0, 0
+	}
+	used := make(map[string]bool, len(cfg.Accounts))
+	for _, account := range cfg.Accounts {
+		if proxy := strings.TrimSpace(account.ProxyURL); proxy != "" {
+			used[proxy] = true
+		}
+	}
+	total = len(cfg.ProxyPool)
+	for _, proxy := range cfg.ProxyPool {
+		if used[proxy] {
+			assigned++
+		}
+	}
+	return total, assigned, total - assigned
+}
+
+// AssignAvailableProxy returns the first pool entry not already bound to an
+// account, continuing from the round-robin cursor.
+func AssignAvailableProxy() string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || len(cfg.ProxyPool) == 0 {
+		return ""
+	}
+	used := make(map[string]bool, len(cfg.Accounts))
+	for _, account := range cfg.Accounts {
+		if proxy := strings.TrimSpace(account.ProxyURL); proxy != "" {
+			used[proxy] = true
+		}
+	}
+	start := cfg.ProxyPoolCursor
+	if start < 0 || start >= len(cfg.ProxyPool) {
+		start = 0
+	}
+	for offset := 0; offset < len(cfg.ProxyPool); offset++ {
+		proxy := cfg.ProxyPool[(start+offset)%len(cfg.ProxyPool)]
+		if proxy != "" && !used[proxy] {
+			return proxy
+		}
+	}
+	return ""
+}
+
+// AddProxyPoolEntries appends unique normalized proxy URLs.
+func AddProxyPoolEntries(entries []string) (int, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return 0, errors.New("config not initialized")
+	}
+	seen := make(map[string]bool, len(cfg.ProxyPool)+len(entries))
+	for _, proxy := range cfg.ProxyPool {
+		seen[proxy] = true
+	}
+	previous := append([]string(nil), cfg.ProxyPool...)
+	previousCursor := cfg.ProxyPoolCursor
+	added := 0
+	for _, proxy := range entries {
+		proxy = strings.TrimSpace(proxy)
+		if proxy == "" || seen[proxy] {
+			continue
+		}
+		cfg.ProxyPool = append(cfg.ProxyPool, proxy)
+		seen[proxy] = true
+		added++
+	}
+	if added == 0 {
+		return 0, nil
+	}
+	if err := Save(); err != nil {
+		cfg.ProxyPool = previous
+		cfg.ProxyPoolCursor = previousCursor
+		return 0, err
+	}
+	return added, nil
+}
+
+// DeleteProxyPoolEntry removes an unassigned proxy from the pool.
+func DeleteProxyPoolEntry(proxyURL string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	idx := -1
+	for i, proxy := range cfg.ProxyPool {
+		if proxy == proxyURL {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+	for _, account := range cfg.Accounts {
+		if strings.TrimSpace(account.ProxyURL) == proxyURL {
+			return fmt.Errorf("proxy is assigned to account %s", account.Email)
+		}
+	}
+	previous := append([]string(nil), cfg.ProxyPool...)
+	previousCursor := cfg.ProxyPoolCursor
+	cursorProxy := proxyPoolCursorProxyLocked()
+	if cursorProxy == proxyURL {
+		cursorProxy = cfg.ProxyPool[(idx+1)%len(cfg.ProxyPool)]
+	}
+	cfg.ProxyPool = append(cfg.ProxyPool[:idx], cfg.ProxyPool[idx+1:]...)
+	cfg.ProxyPoolCursor = proxyPoolIndexLocked(cursorProxy)
+	if cfg.ProxyPoolCursor < 0 {
+		cfg.ProxyPoolCursor = 0
+	}
+	if err := Save(); err != nil {
+		cfg.ProxyPool = previous
+		cfg.ProxyPoolCursor = previousCursor
+		return err
+	}
+	return nil
+}
+
+func proxyPoolIndexLocked(proxyURL string) int {
+	for i, proxy := range cfg.ProxyPool {
+		if proxy == proxyURL {
+			return i
+		}
+	}
+	return -1
+}
+
+func proxyPoolCursorProxyLocked() string {
+	if cfg == nil || len(cfg.ProxyPool) == 0 {
+		return ""
+	}
+	cursor := cfg.ProxyPoolCursor
+	if cursor < 0 || cursor >= len(cfg.ProxyPool) {
+		cursor = 0
+	}
+	return cfg.ProxyPool[cursor]
+}
+
+// requeueProxyPoolEntryLocked moves a released proxy to the tail so it is
+// picked in the next round instead of immediately reusing it.
+func requeueProxyPoolEntryLocked(proxyURL string) {
+	if cfg == nil {
+		return
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	idx := -1
+	for i, proxy := range cfg.ProxyPool {
+		if proxy == proxyURL {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	cursorProxy := proxyPoolCursorProxyLocked()
+	if cursorProxy == proxyURL {
+		cursorProxy = cfg.ProxyPool[(idx+1)%len(cfg.ProxyPool)]
+	}
+	cfg.ProxyPool = append(cfg.ProxyPool[:idx], cfg.ProxyPool[idx+1:]...)
+	cfg.ProxyPool = append(cfg.ProxyPool, proxyURL)
+	cfg.ProxyPoolCursor = proxyPoolIndexLocked(cursorProxy)
+	if cfg.ProxyPoolCursor < 0 {
+		cfg.ProxyPoolCursor = 0
+	}
 }
 
 // GetAllowOverUsage returns whether over-usage is allowed when account quota is exhausted.

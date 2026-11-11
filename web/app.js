@@ -17,6 +17,7 @@
   const dict = { en: null, zh: null, vi: null };
   let accountsData = [];
   let quotaSummary = null;
+  let proxyPoolData = { total: 0, assigned: 0, available: 0, entries: [] };
   const selectedAccounts = new Set();
   let filterKeyword = '';
   let filterStatus = 'all';
@@ -140,6 +141,7 @@
     applyTranslations();
     renderVersionBadge();
     renderQuotaSummary();
+    renderProxyPool();
     renderAccounts();
     renderPromptRules();
     renderLogs(logsCache);
@@ -683,8 +685,12 @@
     setTimeout(checkUpdate, 2000);
   }
   async function loadStats() {
-    const res = await api('/status');
+    const [res, proxyRes] = await Promise.all([api('/status'), api('/proxy-pool')]);
     const d = await res.json();
+    if (proxyRes.ok) {
+      proxyPoolData = await proxyRes.json();
+      renderProxyPool();
+    }
     $('statAccounts').textContent = d.accounts || 0;
     $('statRequests').textContent = d.totalRequests || 0;
     $('statSuccess').textContent = d.successRequests || 0;
@@ -693,6 +699,107 @@
     $('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
     quotaSummary = d;
     renderQuotaSummary();
+  }
+
+  async function addProxyPool() {
+    const input = $('proxyPoolInput');
+    if (!input) return;
+    const proxies = input.value.trim();
+    if (!proxies) {
+      toastWarning(t('proxyPool.emptyInput'));
+      return;
+    }
+    try {
+      const res = await api('/proxy-pool', {
+        method: 'POST',
+        body: JSON.stringify({ proxies })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || t('common.failed'));
+      input.value = '';
+      await loadStats();
+      let message = t('proxyPool.added', data.added || 0);
+      if (data.skipped) message += t('proxyPool.skipped', data.skipped);
+      if (data.errors && data.errors.length) message += t('proxyPool.invalid', data.errors.length);
+      toastPrimary(message);
+    } catch (e) {
+      toastError((e && e.message) || t('common.failed'));
+    }
+  }
+
+  async function removeProxyPool(proxyURL) {
+    const ok = await confirmAction(t('proxyPool.confirmDelete'), {
+      title: t('proxyPool.remove'),
+      confirmText: t('proxyPool.remove'),
+      variant: 'danger'
+    });
+    if (!ok) return;
+    try {
+      const res = await api('/proxy-pool', {
+        method: 'DELETE',
+        body: JSON.stringify({ proxyURL })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || t('common.failed'));
+      await loadStats();
+      toast(t('proxyPool.removed'), 'primary');
+    } catch (e) {
+      toastError((e && e.message) || t('common.failed'));
+    }
+  }
+
+  function renderProxyPool() {
+    const summary = $('proxyPoolSummaryCount');
+    if (!summary) return;
+    const total = proxyPoolData.total || 0;
+    const available = proxyPoolData.available || 0;
+    const assigned = proxyPoolData.assigned || 0;
+    summary.textContent = available + '/' + total;
+    $('proxyPoolAvailableText').textContent = t('proxyPool.available', available, assigned);
+
+    const list = $('proxyPoolList');
+    const entries = proxyPoolData.entries || [];
+    if (!entries.length) {
+      list.innerHTML = '<div class="proxy-pool-empty">' + escapeHtml(t('proxyPool.none')) + '</div>';
+    } else {
+      list.innerHTML = entries.map(entry => {
+        const status = entry.assigned
+          ? t('proxyPool.assigned', entry.email || entry.accountId || '')
+          : t('proxyPool.ready');
+        return '<div class="proxy-pool-entry">' +
+          '<div class="proxy-pool-entry-main">' +
+          '<span class="proxy-pool-entry-url" title="' + escapeAttr(entry.display) + '">' + escapeHtml(entry.display) + '</span>' +
+          '<span class="proxy-pool-entry-status' + (entry.assigned ? ' is-assigned' : '') + '">' + escapeHtml(status) + '</span>' +
+          '</div>' +
+          '<button class="btn btn-secondary btn-xs proxy-pool-remove" type="button" data-proxy-remove="' + escapeAttr(entry.url) + '"' +
+          (entry.assigned ? ' disabled' : '') + '>' + escapeHtml(t('proxyPool.remove')) + '</button>' +
+          '</div>';
+      }).join('');
+    }
+    renderCredentialProxyAvailability();
+  }
+
+  function renderCredentialProxyAvailability() {
+    const el = $('credProxyAvailability');
+    if (!el) return;
+    const total = proxyPoolData.total || 0;
+    const available = proxyPoolData.available || 0;
+    el.classList.remove('is-ready', 'is-empty');
+    if (total === 0) {
+      el.textContent = t('proxyPool.importUnconfigured');
+    } else if (available > 0) {
+      el.textContent = t('proxyPool.importAvailable', available);
+      el.classList.add('is-ready');
+    } else {
+      el.textContent = t('proxyPool.importEmpty');
+      el.classList.add('is-empty');
+    }
+  }
+
+  function ensureProxyAvailable() {
+    if ((proxyPoolData.available || 0) > 0) return true;
+    toastWarning(t((proxyPoolData.total || 0) > 0 ? 'proxyPool.importEmpty' : 'proxyPool.importUnconfigured'));
+    return false;
   }
 
   function renderQuotaSummary() {
@@ -1392,6 +1499,7 @@
       if (d.success) {
         toast(successMsg, 'success');
         loadAccounts();
+        loadStats();
       } else {
         toast(t('detail.saveFailed') + (d.error ? ': ' + d.error : ''), 'error');
       }
@@ -2452,6 +2560,7 @@
     body.innerHTML =
       '<p class="help-block">' + escapeHtml(t('modal.credentialsDesc')) + '</p>' +
       '<p class="help-block">' + escapeHtml(t('credentials.batchHint')) + '</p>' +
+      '<div class="proxy-availability" id="credProxyAvailability"></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('credentials.label')) + '</label>' +
       '<textarea id="credJson" class="font-mono" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderID"}]&#10;or&#10;email----password----refreshToken----clientId----clientSecret\'></textarea>' +
       '</div>' +
@@ -2460,6 +2569,7 @@
       '<button class="btn btn-primary" id="importCredBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
       '</div>';
     $('importCredBtn').addEventListener('click', importCredentials);
+    renderCredentialProxyAvailability();
   }
   function modalCookie(title, body) {
     title.textContent = t('modal.cookieTitle');
@@ -2501,6 +2611,7 @@
 
   // Import handlers
   async function importApiKey() {
+    if (!ensureProxyAvailable()) return;
     const raw = ($('kiroApiKeyInput') && $('kiroApiKeyInput').value || '').trim();
     if (!raw) return toastWarning(t('apikey.missing'));
     let key = raw;
@@ -2534,6 +2645,7 @@
     }
   }
   async function importLocalKiro() {
+    if (!ensureProxyAvailable()) return;
     const provider = $('localProvider').value;
     const tokenJson = $('localTokenJson').value.trim();
     const clientJson = $('localClientJson').value.trim();
@@ -2566,6 +2678,7 @@
     } else toastError(t('common.failed') + ': ' + (d.error || ''));
   }
   async function importCredentials() {
+    if (!ensureProxyAvailable()) return;
     const raw = $('credJson').value.trim();
     if (!raw) { toastWarning(t('credentials.jsonError')); return; }
     let items;
@@ -2720,6 +2833,7 @@
     return { items, skipped };
   }
   async function importFromCookie() {
+    if (!ensureProxyAvailable()) return;
     const refreshToken = $('cookieRefreshToken').value.trim();
     if (!refreshToken) return toastWarning(t('cookie.refreshTokenMissing'));
     const provider = $('cookieProvider').value;
@@ -2733,6 +2847,7 @@
     } else toastError(t('common.failed') + ': ' + (d.error || ''));
   }
   async function importSsoToken() {
+    if (!ensureProxyAvailable()) return;
     const res = await api('/auth/sso-token', {
       method: 'POST', body: JSON.stringify({
         bearerToken: $('ssoToken').value,
@@ -2751,6 +2866,7 @@
     } else toastError(t('common.failed') + ': ' + (d.error || ''));
   }
   async function startBuilderIdLogin() {
+    if (!ensureProxyAvailable()) return;
     const region = $('builderIdRegion').value || 'us-east-1';
     const res = await api('/auth/builderid/start', { method: 'POST', body: JSON.stringify({ region }) });
     const d = await res.json();
@@ -2805,6 +2921,7 @@
         autoRefreshNewAccount(d.account?.id);
       } else toastError(t('common.failed') + ': ' + (d.error || ''));
     } else {
+      if (!ensureProxyAvailable()) return;
       const res = await api('/auth/iam-sso/start', {
         method: 'POST', body: JSON.stringify({
           startUrl: $('iamStartUrl').value, region: $('iamRegion').value
@@ -2866,6 +2983,7 @@
   }
   async function startMicrosoftLogin() {
     if (microsoftBusy) return;
+    if (!ensureProxyAvailable()) return;
     microsoftBusy = true;
     syncMicrosoftBusyUI();
     const generation = microsoftGeneration;
@@ -3313,6 +3431,11 @@
     $('exportBtn').addEventListener('click', showExportModal);
     $('refreshAllModelsBtn').addEventListener('click', refreshAllModels);
     $('addAccountBtn').addEventListener('click', () => showModal('add'));
+    $('addProxyPoolBtn').addEventListener('click', addProxyPool);
+    $('proxyPoolList').addEventListener('click', e => {
+      const btn = e.target.closest('[data-proxy-remove]');
+      if (btn && !btn.disabled) removeProxyPool(btn.dataset.proxyRemove);
+    });
 
     $('selectAllCheckbox').addEventListener('change', e => toggleSelectAll(e.target.checked));
     qsa('[data-batch]').forEach(b => b.addEventListener('click', () => {
