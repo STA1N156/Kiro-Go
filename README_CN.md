@@ -128,7 +128,9 @@ OAuth 社交账号和 Builder ID 使用当前 Kiro IDE 协议：`POST https://ru
 
 ## 思考模式
 
-在模型名后加后缀（默认 `-thinking`）即可启用，例如 `claude-sonnet-4.5-thinking`。Claude 兼容请求如果带有顶层 `thinking` 配置，例如 `{"type":"enabled","budget_tokens":2048}` 或 `{"type":"adaptive"}`，也会自动启用 thinking 模式。输出格式可在管理面板「设置 - Thinking 模式」中配置。
+在模型名后加后缀（默认 `-thinking`）即可启用。Claude 顶层 `thinking`、OpenAI Chat 的 `reasoning_effort` / `reasoning.effort`、Responses 中同名字段会覆盖模型后缀。思考强度统一通过 `additionalModelRequestFields` 发送；`none`、`off`、`disabled` 会关闭思考。不会注入思考提示词，上游思考正文和 `redactedContent` 会按对应接口格式返回。输出格式可在管理面板「设置 - Thinking 模式」中配置。
+
+Opus 5.5 和 Sonnet 5.5 不支持关闭思考，因此关闭请求会使用 `adaptive + low`；开启请求使用指定强度，未指定时使用 `high`。
 
 ## 出站代理
 

@@ -161,7 +161,7 @@ type KiroPayload struct {
 	InferenceConfig              *InferenceConfig       `json:"inferenceConfig,omitempty"`
 	AdditionalModelRequestFields map[string]interface{} `json:"additionalModelRequestFields,omitempty"`
 
-	// ToolNameMap maps sanitized tool names (sent to Kiro) back to the
+	// ToolNameMap maps shortened tool names (sent to Kiro) back to the
 	// original names supplied by the client. Used to restore original names
 	// in tool_use responses so the client can match them to its tool registry.
 	// Not serialized to the Kiro API request body.
@@ -249,6 +249,7 @@ type InferenceConfig struct {
 type KiroStreamCallback struct {
 	OnText               func(text string, isThinking bool)
 	OnReasoningSignature func(signature string)
+	OnRedactedReasoning  func(data string)
 	OnToolUse            func(toolUse KiroToolUse)
 	OnStopReason         func(reason string)
 	OnComplete           func(inputTokens, outputTokens int)
@@ -634,6 +635,13 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 			}
 			if signature, ok := event["signature"].(string); ok && signature != "" && callback.OnReasoningSignature != nil {
 				callback.OnReasoningSignature(signature)
+			}
+			if redacted, ok := event["redactedContent"].(string); ok && redacted != "" {
+				sawOutput = true
+				if callback.OnRedactedReasoning != nil {
+					emitted = true
+					callback.OnRedactedReasoning(redacted)
+				}
 			}
 		case "toolUseEvent":
 			nextToolUse, toolErr := handleToolUseEvent(event, currentToolUse, callback)

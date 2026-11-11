@@ -1004,6 +1004,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			nextContentIndex++
 
 			if blockType == "thinking" {
+				thinkingSignature = ""
+				signatureSent = false
 				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
@@ -1109,6 +1111,29 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				"delta": map[string]string{"type": "signature_delta", "signature": thinkingSignature},
 			})
 			signatureSent = true
+		}
+
+		sendRedactedThinking := func(data string) {
+			if data == "" {
+				return
+			}
+			ensureMessageStart()
+			sendThinkingSignature()
+			closeActiveBlock()
+			idx := nextContentIndex
+			nextContentIndex++
+			h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				"type":  "content_block_start",
+				"index": idx,
+				"content_block": map[string]string{
+					"type": "redacted_thinking",
+					"data": data,
+				},
+			})
+			h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": idx,
+			})
 		}
 
 		processClaudeText := func(text string, isThinking bool, forceFlush bool) {
@@ -1219,6 +1244,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				thinkingSignature = signature
 				sendThinkingSignature()
 			},
+			OnRedactedReasoning: sendRedactedThinking,
 			OnToolUse: func(tu KiroToolUse) {
 				processClaudeText("", false, true)
 				rawContentBuilder.WriteString(tu.Name)
@@ -1547,6 +1573,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		var content, thinkingContent strings.Builder
 		var thinkingSignature string
 		var upstreamStopReason string
+		var redactedReasoning []string
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
 		var credits float64
@@ -1575,6 +1602,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 			OnReasoningSignature: func(signature string) {
 				thinkingSignature = signature
+			},
+			OnRedactedReasoning: func(data string) {
+				redactedReasoning = append(redactedReasoning, data)
 			},
 			OnStopReason: func(reason string) {
 				upstreamStopReason = reason
@@ -1632,7 +1662,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 
 		resp := KiroToClaudeResponse(
 			finalContent, responseThinkingContent, thinkingSignature, upstreamStopReason,
-			false, toolUses, inputTokens, outputTokens, model,
+			redactedReasoning, false, toolUses, inputTokens, outputTokens, model,
 		)
 		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 		resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
@@ -1755,6 +1785,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		var upstreamStopReason string
 		var rawContentBuilder strings.Builder
 		var rawReasoningBuilder strings.Builder
+		var redactedReasoning []string
 		var textBuffer string
 		var inThinkingBlock bool
 		var dropTagThinking bool
@@ -1854,6 +1885,27 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			}
 			data, _ := json.Marshal(chunk)
 			fmt.Fprintf(w, "data: %s\n\n", string(data))
+			flusher.Flush()
+			responseStarted = true
+		}
+
+		sendRedactedReasoning := func(data string) {
+			if data == "" {
+				return
+			}
+			chunk := map[string]interface{}{
+				"id":      chatID,
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   model,
+				"choices": []map[string]interface{}{{
+					"index":         0,
+					"delta":         map[string]string{"redacted_reasoning_content": data},
+					"finish_reason": nil,
+				}},
+			}
+			encoded, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", string(encoded))
 			flusher.Flush()
 			responseStarted = true
 		}
@@ -2012,6 +2064,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			OnStopReason: func(reason string) {
 				upstreamStopReason = reason
 			},
+			OnRedactedReasoning: func(data string) {
+				redactedReasoning = append(redactedReasoning, data)
+				sendRedactedReasoning(data)
+			},
 		}
 
 		err := h.callKiroAPIContext(requestContext(w), account, payload, callback)
@@ -2121,6 +2177,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		var content, reasoning strings.Builder
+		var redactedReasoning []string
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
 		var credits float64
@@ -2143,6 +2200,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 			OnStopReason: func(reason string) {
 				upstreamStopReason = reason
+			},
+			OnRedactedReasoning: func(data string) {
+				redactedReasoning = append(redactedReasoning, data)
 			},
 		}
 
@@ -2182,7 +2242,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 		resp := KiroToOpenAIResponseWithReasoning(
-			finalContent, reasoningContent, upstreamStopReason,
+			finalContent, reasoningContent, strings.Join(redactedReasoning, ""), upstreamStopReason,
 			toolUses, inputTokens, outputTokens, model, thinkingFormat,
 		)
 		resp["usage"] = h.promptCache.openAIUsage(cacheProfile, inputTokens, outputTokens)

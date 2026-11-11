@@ -45,6 +45,14 @@ func parseResponsesInput(raw json.RawMessage) ([]OpenAIMessage, error) {
 func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error) {
 	messages := make([]OpenAIMessage, 0, len(items))
 	pendingUserParts := []interface{}{}
+	pendingRedactedReasoning := ""
+
+	attachPendingReasoning := func(msg *OpenAIMessage) {
+		if msg != nil && msg.Role == "assistant" && pendingRedactedReasoning != "" {
+			msg.RedactedReasoningContent = pendingRedactedReasoning
+			pendingRedactedReasoning = ""
+		}
+	}
 
 	flushPendingUser := func() {
 		if len(pendingUserParts) == 0 {
@@ -71,7 +79,14 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 			flushPendingUser()
 			msg := buildMessageFromInputItem(obj, role)
 			if msg != nil {
+				attachPendingReasoning(msg)
 				messages = append(messages, *msg)
+			}
+
+		case typ == "reasoning":
+			flushPendingUser()
+			if encrypted, _ := obj["encrypted_content"].(string); encrypted != "" {
+				pendingRedactedReasoning += encrypted
 			}
 
 		case typ == "function_call_output" || typ == "tool_result":
@@ -114,12 +129,15 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 				len(messages[n-1].ToolCalls) > 0 &&
 				strings.TrimSpace(extractOpenAIMessageText(messages[n-1].Content)) == "" {
 				messages[n-1].ToolCalls = append(messages[n-1].ToolCalls, tc)
+				attachPendingReasoning(&messages[n-1])
 			} else {
-				messages = append(messages, OpenAIMessage{
+				msg := OpenAIMessage{
 					Role:      "assistant",
 					Content:   "",
 					ToolCalls: []ToolCall{tc},
-				})
+				}
+				attachPendingReasoning(&msg)
+				messages = append(messages, msg)
 			}
 
 		case typ == "input_text" || typ == "text":
@@ -138,7 +156,9 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 			flushPendingUser()
 			text, _ := obj["text"].(string)
 			if text != "" {
-				messages = append(messages, OpenAIMessage{Role: "assistant", Content: text})
+				msg := OpenAIMessage{Role: "assistant", Content: text}
+				attachPendingReasoning(&msg)
+				messages = append(messages, msg)
 			}
 
 		default:
@@ -146,6 +166,7 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 				flushPendingUser()
 				msg := buildMessageFromInputItem(obj, role)
 				if msg != nil {
+					attachPendingReasoning(msg)
 					messages = append(messages, *msg)
 				}
 			}

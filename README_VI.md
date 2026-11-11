@@ -113,7 +113,9 @@ Tài khoản OAuth social và Builder ID dùng giao thức Kiro IDE hiện tại
 
 ## Chế độ Thinking
 
-Thêm hậu tố (mặc định `-thinking`) vào tên mô hình, ví dụ `claude-sonnet-4.5-thinking`. Các yêu cầu tương thích Claude có cấu hình `thinking` ở top-level như `{"type":"enabled","budget_tokens":2048}` hoặc `{"type":"adaptive"}` cũng tự bật chế độ thinking. Cấu hình định dạng đầu ra trong bảng quản trị tại Cài đặt - Chế độ Thinking.
+Thêm hậu tố (mặc định `-thinking`) vào tên mô hình để bật thinking. Cấu hình `thinking` của Claude, `reasoning_effort` / `reasoning.effort` của OpenAI Chat và các trường tương ứng của Responses sẽ ghi đè hậu tố. Mức độ suy luận được gửi qua `additionalModelRequestFields`; `none`, `off` và `disabled` sẽ tắt thinking. Proxy không chèn prompt thinking và sẽ trả lại nội dung suy luận cùng `redactedContent` theo đúng định dạng API. Định dạng đầu ra có thể đổi trong Cài đặt - Chế độ Thinking.
+
+Opus 5.5 và Sonnet 5.5 không hỗ trợ tắt thinking, nên yêu cầu tắt sẽ dùng `adaptive + low`; yêu cầu bật dùng mức đã chọn hoặc `high` nếu không chỉ định.
 
 ## Proxy ra ngoài
 

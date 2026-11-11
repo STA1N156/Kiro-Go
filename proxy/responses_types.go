@@ -3,17 +3,19 @@ package proxy
 import "encoding/json"
 
 type ResponsesRequest struct {
-	Model              string            `json:"model"`
-	Input              json.RawMessage   `json:"input"`
-	Instructions       string            `json:"instructions,omitempty"`
-	Stream             bool              `json:"stream,omitempty"`
-	Tools              []OpenAITool      `json:"tools,omitempty"`
-	ToolChoice         json.RawMessage   `json:"tool_choice,omitempty"`
-	PreviousResponseID string            `json:"previous_response_id,omitempty"`
-	Store              *bool             `json:"store,omitempty"`
-	Temperature        *float64          `json:"temperature,omitempty"`
-	MaxOutputTokens    *int              `json:"max_output_tokens,omitempty"`
-	Metadata           map[string]string `json:"metadata,omitempty"`
+	Model              string                 `json:"model"`
+	Input              json.RawMessage        `json:"input"`
+	Instructions       string                 `json:"instructions,omitempty"`
+	Stream             bool                   `json:"stream,omitempty"`
+	Tools              []OpenAITool           `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage        `json:"tool_choice,omitempty"`
+	ReasoningEffort    string                 `json:"reasoning_effort,omitempty"`
+	Reasoning          *OpenAIReasoningConfig `json:"reasoning,omitempty"`
+	PreviousResponseID string                 `json:"previous_response_id,omitempty"`
+	Store              *bool                  `json:"store,omitempty"`
+	Temperature        *float64               `json:"temperature,omitempty"`
+	MaxOutputTokens    *int                   `json:"max_output_tokens,omitempty"`
+	Metadata           map[string]string      `json:"metadata,omitempty"`
 }
 
 type ResponsesObject struct {
@@ -34,15 +36,16 @@ type ResponsesObject struct {
 }
 
 type ResponseOutputItem struct {
-	ID        string                `json:"id"`
-	Type      string                `json:"type"`
-	Role      string                `json:"role,omitempty"`
-	Status    string                `json:"status,omitempty"`
-	Content   []ResponseContentPart `json:"content,omitempty"`
-	Summary   []ResponseContentPart `json:"summary,omitempty"`
-	CallID    string                `json:"call_id,omitempty"`
-	Name      string                `json:"name,omitempty"`
-	Arguments string                `json:"arguments,omitempty"`
+	ID               string                `json:"id"`
+	Type             string                `json:"type"`
+	Role             string                `json:"role,omitempty"`
+	Status           string                `json:"status,omitempty"`
+	Content          []ResponseContentPart `json:"content,omitempty"`
+	Summary          []ResponseContentPart `json:"summary,omitempty"`
+	CallID           string                `json:"call_id,omitempty"`
+	Name             string                `json:"name,omitempty"`
+	Arguments        string                `json:"arguments,omitempty"`
+	EncryptedContent string                `json:"encrypted_content,omitempty"`
 }
 
 type ResponseContentPart struct {

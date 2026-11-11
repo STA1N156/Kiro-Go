@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"kiro-go/config"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,21 +78,178 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	return model, thinking
 }
 
-func nativeThinkingFields(model string, thinking bool) map[string]interface{} {
-	// Avoid sending Claude-only parameters to other model families.
-	if !strings.HasPrefix(strings.ToLower(model), "claude-") {
+type kiroReasoningOption struct {
+	Effort   string
+	Disabled bool
+	Display  string
+}
+
+var kiroEffortModelPattern = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[.-](\d+))?`)
+
+func claudeReasoningOption(req *ClaudeRequest, thinking bool) *kiroReasoningOption {
+	option := &kiroReasoningOption{Disabled: !thinking, Display: "summarized"}
+	if req == nil || req.Thinking == nil {
+		return option
+	}
+
+	cfg := req.Thinking
+	kind := strings.ToLower(strings.TrimSpace(cfg.Type))
+	if display := strings.ToLower(strings.TrimSpace(cfg.Display)); display != "" {
+		option.Display = normalizeReasoningDisplay(display)
+	}
+	switch kind {
+	case "disabled":
+		option.Disabled = true
+		option.Effort = ""
+	case "enabled", "adaptive":
+		option.Disabled = false
+		option.Effort = effortFromBudget(cfg.BudgetTokens)
+	}
+	return option
+}
+
+func openAIReasoningOption(req *OpenAIRequest, thinking bool) *kiroReasoningOption {
+	option := &kiroReasoningOption{Disabled: !thinking, Display: "summarized"}
+	if req == nil {
+		return option
+	}
+
+	effort := strings.TrimSpace(req.ReasoningEffort)
+	if effort == "" && req.Reasoning != nil {
+		effort = strings.TrimSpace(req.Reasoning.Effort)
+		if summary := strings.ToLower(strings.TrimSpace(req.Reasoning.Summary)); summary != "" {
+			option.Display = normalizeReasoningDisplay(summary)
+		}
+	}
+	if effort == "" {
+		if thinking {
+			option.Effort = "high"
+		}
+		return option
+	}
+
+	switch strings.ToLower(effort) {
+	case "none", "off", "disabled":
+		option.Disabled = true
+	default:
+		option.Disabled = false
+		option.Effort = effort
+	}
+	return option
+}
+
+func effortFromBudget(budget int) string {
+	switch {
+	case budget <= 0:
+		return "high"
+	case budget <= 2048:
+		return "low"
+	case budget <= 8192:
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
+func buildAdditionalModelRequestFields(model string, option *kiroReasoningOption) map[string]interface{} {
+	path := kiroEffortPath(model)
+	if path == "" || option == nil {
 		return nil
 	}
-	if !thinking && !strings.EqualFold(model, "claude-opus-5.5") && !strings.EqualFold(model, "claude-sonnet-5.5") {
+
+	if path == "reasoning" {
+		effort := normalizeGPTeffort(option.Effort)
+		if option.Disabled || effort == "" {
+			return nil
+		}
+		return map[string]interface{}{"reasoning": map[string]string{"effort": effort}}
+	}
+
+	if option.Disabled {
+		if isClaude55(model) {
+			return map[string]interface{}{
+				"thinking":      ClaudeThinkingConfig{Type: "adaptive", Display: normalizeReasoningDisplay(option.Display)},
+				"output_config": map[string]string{"effort": "low"},
+			}
+		}
 		return map[string]interface{}{"thinking": ClaudeThinkingConfig{Type: "disabled"}}
 	}
-	effort := "high"
-	if !thinking {
-		effort = "low" // Opus/Sonnet 5.5 use low effort instead of disabled thinking.
+
+	effort := normalizeClaudeEffort(option.Effort)
+	if effort == "" {
+		effort = "high"
 	}
 	return map[string]interface{}{
-		"thinking":      ClaudeThinkingConfig{Type: "adaptive", Display: "summarized"},
+		"thinking":      ClaudeThinkingConfig{Type: "adaptive", Display: normalizeReasoningDisplay(option.Display)},
 		"output_config": map[string]string{"effort": effort},
+	}
+}
+
+func kiroEffortPath(model string) string {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	gptNormalized := strings.NewReplacer("-", ".", "_", ".").Replace(normalized)
+	if strings.Contains(gptNormalized, "gpt.5.6") {
+		return "reasoning"
+	}
+	match := kiroEffortModelPattern.FindStringSubmatch(normalized)
+	if match == nil {
+		return ""
+	}
+	major, err := strconv.Atoi(match[1])
+	if err != nil {
+		return ""
+	}
+	minor := 0
+	if match[2] != "" {
+		minor, err = strconv.Atoi(match[2])
+		if err != nil {
+			return ""
+		}
+	}
+	if minor >= 1000 || major < 4 || (major == 4 && minor <= 5) {
+		return ""
+	}
+	return "output_config"
+}
+
+func isClaude55(model string) bool {
+	return strings.EqualFold(model, "claude-opus-5.5") || strings.EqualFold(model, "claude-sonnet-5.5")
+}
+
+func normalizeClaudeEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "high", "xhigh", "max":
+		return "high"
+	default:
+		return ""
+	}
+}
+
+func normalizeReasoningDisplay(display string) string {
+	switch strings.ToLower(strings.TrimSpace(display)) {
+	case "omitted", "none":
+		return "omitted"
+	default:
+		return "summarized"
+	}
+}
+
+func normalizeGPTeffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal", "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "high":
+		return "high"
+	case "xhigh", "max":
+		return "xhigh"
+	default:
+		return ""
 	}
 }
 
@@ -131,6 +289,7 @@ type ClaudeContentBlock struct {
 	Text      string       `json:"text,omitempty"`
 	Thinking  string       `json:"thinking,omitempty"`
 	Signature string       `json:"signature,omitempty"`
+	Data      string       `json:"data,omitempty"`
 	ID        string       `json:"id,omitempty"`
 	Name      string       `json:"name,omitempty"`
 	Input     interface{}  `json:"input,omitempty"`
@@ -295,7 +454,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// 构建 payload
 	payload := &KiroPayload{
 		AgentMode:                    "vibe",
-		AdditionalModelRequestFields: nativeThinkingFields(modelID, thinking),
+		AdditionalModelRequestFields: buildAdditionalModelRequestFields(modelID, claudeReasoningOption(req, thinking)),
 	}
 	payload.ToolNameMap = toolNameMap
 	payload.ConversationState.ChatTriggerType = "MANUAL"
@@ -746,13 +905,13 @@ func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]strin
 		if len(desc) > maxToolDescLen {
 			desc = desc[:maxToolDescLen] + "..."
 		}
-		sanitized := shortenToolName(sanitizeToolName(tool.Name))
-		if sanitized != tool.Name {
-			nameMap[sanitized] = tool.Name
+		name := shortenToolName(tool.Name)
+		if name != tool.Name {
+			nameMap[name] = tool.Name
 		}
 		w := KiroToolWrapper{}
-		w.ToolSpecification.Name = sanitized
-		w.ToolSpecification.Description = normalizeToolDesc(desc, sanitized)
+		w.ToolSpecification.Name = name
+		w.ToolSpecification.Description = normalizeToolDesc(desc, name)
 		w.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.InputSchema)}
 		result = append(result, w)
 	}
@@ -800,14 +959,13 @@ func hasKiroWebSearchTool(tools []KiroToolWrapper) bool {
 	return false
 }
 
-// ensureObjectSchema 确保工具 schema 顶层是 object，并清理 Kiro 不接受的字段。
+// ensureObjectSchema 保留客户端提供的全部字段，仅在缺少顶层类型时补 object。
 func ensureObjectSchema(schema interface{}) interface{} {
 	m, ok := schema.(map[string]interface{})
 	if !ok {
 		return map[string]interface{}{"type": "object"}
 	}
 	cleaned := cloneSchemaMap(m)
-	cleanSchema(cleaned)
 	if _, hasType := cleaned["type"]; !hasType {
 		cleaned["type"] = "object"
 	}
@@ -837,77 +995,11 @@ func cloneSchemaValue(v interface{}) interface{} {
 	}
 }
 
-// cleanSchema 递归清理会导致 Kiro 400 的 schema 字段。
-func cleanSchema(m map[string]interface{}) {
-	delete(m, "additionalProperties")
-
-	// required 必须是非空数组，否则 Kiro 会报 Improperly formed request。
-	if req, exists := m["required"]; exists {
-		switch arr := req.(type) {
-		case nil:
-			delete(m, "required")
-		case []interface{}:
-			if len(arr) == 0 {
-				delete(m, "required")
-			}
-		case []string:
-			if len(arr) == 0 {
-				delete(m, "required")
-			}
-		default:
-			delete(m, "required")
-		}
-	}
-
-	for _, v := range m {
-		switch val := v.(type) {
-		case map[string]interface{}:
-			cleanSchema(val)
-		case []interface{}:
-			for _, item := range val {
-				if sub, ok := item.(map[string]interface{}); ok {
-					cleanSchema(sub)
-				}
-			}
-		}
-	}
-}
-
 func normalizeToolDesc(desc, name string) string {
 	if strings.TrimSpace(desc) != "" {
 		return desc
 	}
 	return "Tool: " + name
-}
-
-// sanitizeToolName normalizes a tool name to characters the Kiro API accepts.
-// Kiro tool names must be pure camelCase (no underscores or dashes).
-// Separators (_, -, and multi-underscore namespace prefixes) are converted to camelCase boundaries.
-func sanitizeToolName(name string) string {
-	// Split on underscores and dashes, including multi-underscore namespace prefixes.
-	parts := strings.FieldsFunc(name, func(r rune) bool {
-		return r == '_' || r == '-'
-	})
-	if len(parts) == 0 {
-		return "tool"
-	}
-	// Build camelCase: first part lowercase start, rest capitalize first letter
-	var b strings.Builder
-	for i, part := range parts {
-		if part == "" {
-			continue
-		}
-		if i == 0 {
-			b.WriteString(strings.ToLower(part[:1]) + part[1:])
-		} else {
-			b.WriteString(strings.ToUpper(part[:1]) + part[1:])
-		}
-	}
-	result := b.String()
-	if result == "" {
-		return "tool"
-	}
-	return result
 }
 
 func shortenToolName(name string) string {
@@ -929,8 +1021,14 @@ func shortenToolName(name string) string {
 
 // ==================== Kiro -> Claude 转换 ====================
 
-func KiroToClaudeResponse(content, thinkingContent, thinkingSignature, stopReason string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
+func KiroToClaudeResponse(content, thinkingContent, thinkingSignature, stopReason string, redactedReasoning []string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
 	blocks := make([]ClaudeContentBlock, 0)
+
+	for _, data := range redactedReasoning {
+		if data != "" {
+			blocks = append(blocks, ClaudeContentBlock{Type: "redacted_thinking", Data: data})
+		}
+	}
 
 	if thinkingContent != "" || includeEmptyThinkingBlock {
 		blocks = append(blocks, ClaudeContentBlock{
@@ -975,20 +1073,28 @@ func KiroToClaudeResponse(content, thinkingContent, thinkingSignature, stopReaso
 // ==================== OpenAI API 类型 ====================
 
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
+	Model           string                 `json:"model"`
+	Messages        []OpenAIMessage        `json:"messages"`
+	MaxTokens       int                    `json:"max_tokens,omitempty"`
+	Temperature     float64                `json:"temperature,omitempty"`
+	TopP            float64                `json:"top_p,omitempty"`
+	Stream          bool                   `json:"stream,omitempty"`
+	Tools           []OpenAITool           `json:"tools,omitempty"`
+	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
+	Reasoning       *OpenAIReasoningConfig `json:"reasoning,omitempty"`
+}
+
+type OpenAIReasoningConfig struct {
+	Effort  string `json:"effort,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 type OpenAIMessage struct {
-	Role       string      `json:"role"`
-	Content    interface{} `json:"content"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role                     string      `json:"role"`
+	Content                  interface{} `json:"content"`
+	RedactedReasoningContent string      `json:"redacted_reasoning_content,omitempty"`
+	ToolCalls                []ToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID               string      `json:"tool_call_id,omitempty"`
 }
 
 type ToolCall struct {
@@ -1143,10 +1249,15 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 				})
 			}
 
+			var reasoning *KiroReasoning
+			if msg.RedactedReasoningContent != "" {
+				reasoning = &KiroReasoning{RedactedContent: msg.RedactedReasoningContent}
+			}
 			history = append(history, KiroHistoryMessage{
 				AssistantResponseMessage: &KiroAssistantResponseMessage{
-					Content:  content,
-					ToolUses: toolUses,
+					Content:          content,
+					ToolUses:         toolUses,
+					ReasoningContent: reasoning,
 				},
 			})
 
@@ -1239,13 +1350,14 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// 转换工具
-	kiroTools := convertOpenAITools(req.Tools)
+	kiroTools, toolNameMap := convertOpenAITools(req.Tools)
 
 	// 构建 payload
 	payload := &KiroPayload{
 		AgentMode:                    "vibe",
-		AdditionalModelRequestFields: nativeThinkingFields(modelID, thinking),
+		AdditionalModelRequestFields: buildAdditionalModelRequestFields(modelID, openAIReasoningOption(req, thinking)),
 	}
+	payload.ToolNameMap = toolNameMap
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
 	payload.ConversationState.AgentTaskType = "vibe"
@@ -1884,12 +1996,13 @@ func parseBase64Image(data, format string) *KiroImage {
 	}
 }
 
-func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
+func convertOpenAITools(tools []OpenAITool) ([]KiroToolWrapper, map[string]string) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	result := make([]KiroToolWrapper, 0, len(tools))
+	nameMap := make(map[string]string)
 	for _, tool := range tools {
 		if tool.Type != "function" {
 			continue
@@ -1903,13 +2016,16 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 			// Kiro rejects tools with empty names; skip unusable specs.
 			continue
 		}
+		if name != tool.Function.Name {
+			nameMap[name] = tool.Function.Name
+		}
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
 		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
 		result = append(result, wrapper)
 	}
-	return result
+	return result, nameMap
 }
 
 // ==================== Kiro -> OpenAI 转换 ====================
@@ -1984,7 +2100,7 @@ func extractThinkingFromContent(content string) (string, string) {
 }
 
 // KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
-func KiroToOpenAIResponseWithReasoning(content, reasoningContent, stopReason string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent, redactedReasoning, stopReason string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
 	finishReason := openAIFinishReason(stopReason, len(toolUses) > 0)
 
 	message := map[string]interface{}{
@@ -2021,6 +2137,9 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent, stopReason str
 		} else {
 			message["content"] = content
 		}
+	}
+	if redactedReasoning != "" {
+		message["redacted_reasoning_content"] = redactedReasoning
 	}
 
 	return map[string]interface{}{

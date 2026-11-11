@@ -83,18 +83,26 @@ func outputToMessages(items []ResponseOutputItem) []OpenAIMessage {
 		return nil
 	}
 	out := make([]OpenAIMessage, 0, len(items))
+	pendingRedactedReasoning := ""
 	for _, item := range items {
 		switch item.Type {
+		case "reasoning":
+			if item.EncryptedContent != "" {
+				pendingRedactedReasoning += item.EncryptedContent
+			}
 		case "message":
 			text := joinTextParts(item.Content)
 			role := item.Role
 			if role == "" {
 				role = "assistant"
 			}
-			if text == "" && role == "assistant" {
+			if text == "" && role == "assistant" && pendingRedactedReasoning == "" {
 				continue
 			}
-			out = append(out, OpenAIMessage{Role: role, Content: text})
+			out = append(out, OpenAIMessage{
+				Role: role, Content: text, RedactedReasoningContent: pendingRedactedReasoning,
+			})
+			pendingRedactedReasoning = ""
 		case "function_call":
 			tc := ToolCall{ID: item.CallID, Type: "function"}
 			if tc.ID == "" {
@@ -103,10 +111,11 @@ func outputToMessages(items []ResponseOutputItem) []OpenAIMessage {
 			tc.Function.Name = item.Name
 			tc.Function.Arguments = item.Arguments
 			out = append(out, OpenAIMessage{
-				Role:      "assistant",
-				Content:   "",
-				ToolCalls: []ToolCall{tc},
+				Role: "assistant", Content: "",
+				RedactedReasoningContent: pendingRedactedReasoning,
+				ToolCalls:                []ToolCall{tc},
 			})
+			pendingRedactedReasoning = ""
 		}
 	}
 	return out

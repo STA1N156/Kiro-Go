@@ -97,10 +97,12 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	openaiReq := &OpenAIRequest{
-		Model:    req.Model,
-		Messages: finalMessages,
-		Stream:   req.Stream,
-		Tools:    req.Tools,
+		Model:           req.Model,
+		Messages:        finalMessages,
+		Stream:          req.Stream,
+		Tools:           req.Tools,
+		ReasoningEffort: req.ReasoningEffort,
+		Reasoning:       req.Reasoning,
 	}
 	if req.Temperature != nil {
 		openaiReq.Temperature = *req.Temperature
@@ -161,6 +163,7 @@ func (h *Handler) handleResponsesNonStream(
 		}
 
 		var content, reasoning strings.Builder
+		var redactedReasoning []string
 		var toolUses []KiroToolUse
 		var inputTokens, outputTokens int
 		var credits float64
@@ -174,7 +177,10 @@ func (h *Handler) handleResponsesNonStream(
 					content.WriteString(text)
 				}
 			},
-			OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+			OnToolUse: func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+			OnRedactedReasoning: func(data string) {
+				redactedReasoning = append(redactedReasoning, data)
+			},
 			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 			OnCredits:  func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
@@ -213,7 +219,10 @@ func (h *Handler) handleResponsesNonStream(
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(
+			respID, model, finalContent, reasoningContent, redactedReasoning,
+			toolUses, inputTokens, outputTokens, req,
+		)
 		if cacheProfile != nil {
 			respObj.Usage.InputTokensDetails = &cachedTokenDetails{h.promptCache.finish(cacheProfile, inputTokens).CacheReadInputTokens}
 		}
@@ -240,7 +249,7 @@ func (h *Handler) handleResponsesNonStream(
 }
 
 func buildResponsesObject(
-	id, model, content, reasoning string, toolUses []KiroToolUse,
+	id, model, content, reasoning string, redactedReasoning []string, toolUses []KiroToolUse,
 	inputTokens, outputTokens int, req *ResponsesRequest,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
@@ -249,6 +258,14 @@ func buildResponsesObject(
 			ID: generateOutputItemID("rs"), Type: "reasoning", Status: "completed",
 			Summary: []ResponseContentPart{{Type: "summary_text", Text: reasoning}},
 		})
+	}
+	for _, data := range redactedReasoning {
+		if data != "" {
+			output = append(output, ResponseOutputItem{
+				ID: generateOutputItemID("rs"), Type: "reasoning", Status: "completed",
+				EncryptedContent: data,
+			})
+		}
 	}
 
 	if strings.TrimSpace(content) != "" {
@@ -467,6 +484,24 @@ func (h *Handler) handleResponsesStream(
 				})
 				responseStarted = true
 			},
+			OnRedactedReasoning: func(data string) {
+				if data == "" {
+					return
+				}
+				idx := len(streamOutput)
+				item := ResponseOutputItem{
+					ID: generateOutputItemID("rs"), Type: "reasoning", Status: "completed",
+					EncryptedContent: data,
+				}
+				streamOutput = append(streamOutput, item)
+				send("response.output_item.added", map[string]interface{}{
+					"type": "response.output_item.added", "output_index": idx, "item": item,
+				})
+				send("response.output_item.done", map[string]interface{}{
+					"type": "response.output_item.done", "output_index": idx, "item": item,
+				})
+				responseStarted = true
+			},
 			OnToolUse: func(tu KiroToolUse) {
 				if messageStarted {
 					streamOutput[outputIndex].Content = []ResponseContentPart{{Type: "output_text", Text: messageText.String()}}
@@ -634,7 +669,7 @@ func (h *Handler) handleResponsesStream(
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
-		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, reasoning, nil, toolUses, inputTokens, outputTokens, req)
 		if len(streamOutput) > 0 {
 			respObj.Output = streamOutput
 		}
