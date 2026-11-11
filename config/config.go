@@ -913,6 +913,9 @@ func UpdateAccountCredentialState(
 			cfg.Accounts[i].AccessToken = accessToken
 			if refreshToken != "" {
 				cfg.Accounts[i].RefreshToken = refreshToken
+				if !cfg.Accounts[i].MachineIdLocked {
+					cfg.Accounts[i].MachineId = MachineIdForCredentials(refreshToken, "")
+				}
 			}
 			cfg.Accounts[i].ExpiresAt = expiresAt
 			if profileArn != "" {

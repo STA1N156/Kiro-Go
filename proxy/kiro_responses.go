@@ -89,7 +89,10 @@ func callKiroResponsesAPI(
 	callback *KiroStreamCallback,
 	requestConfig kiroRequestConfig,
 ) error {
-	payload.ConversationState.AgentContinuationId = uuid.NewString()
+	if !payload.ResponsesAgentContinuationSet {
+		payload.ConversationState.AgentContinuationId = uuid.NewString()
+		payload.ResponsesAgentContinuationSet = true
+	}
 	body, err := buildKiroResponsesBody(payload)
 	if err != nil {
 		return err

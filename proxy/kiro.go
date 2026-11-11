@@ -163,6 +163,11 @@ type KiroPayload struct {
 	// values as a JSON string, the response path unwraps it before returning to
 	// the client.
 	ToolRepairFields map[string]map[string]bool `json:"-"`
+
+	// ResponsesAgentContinuationSet separates the per-turn random continuation
+	// id used by /v1/responses from the deterministic old-wire value. It is set
+	// once per payload so account retries reuse the same id.
+	ResponsesAgentContinuationSet bool `json:"-"`
 }
 
 type KiroUserInputMessage struct {

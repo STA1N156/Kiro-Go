@@ -2,6 +2,9 @@ package auth
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/lzw"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/google/uuid"
 )
 
@@ -94,8 +98,11 @@ func refreshOIDCToken(ctx context.Context, account *config.Account, client *http
 	}
 	defer resp.Body.Close()
 
+	respBody, err := readRefreshResponseBody(resp)
+	if err != nil {
+		return "", "", 0, "", err
+	}
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
 		return "", "", 0, "", fmt.Errorf("refresh failed: %d %s", resp.StatusCode, string(respBody))
 	}
 
@@ -106,12 +113,45 @@ func refreshOIDCToken(ctx context.Context, account *config.Account, client *http
 		ProfileArn   string `json:"profileArn"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return "", "", 0, "", err
 	}
 
 	expiresAt := time.Now().Unix() + int64(result.ExpiresIn)
 	return result.AccessToken, result.RefreshToken, expiresAt, result.ProfileArn, nil
+}
+
+func readRefreshResponseBody(resp *http.Response) ([]byte, error) {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil || len(raw) == 0 {
+		return raw, err
+	}
+	var reader io.Reader = bytes.NewReader(raw)
+	switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
+	case "", "identity":
+		return raw, nil
+	case "gzip", "x-gzip":
+		r, err := gzip.NewReader(reader)
+		if err != nil {
+			return nil, err
+		}
+		defer r.Close()
+		reader = r
+	case "deflate":
+		r, err := zlib.NewReader(reader)
+		if err != nil {
+			return nil, err
+		}
+		defer r.Close()
+		reader = r
+	case "br":
+		reader = brotli.NewReader(reader)
+	case "compress":
+		r := lzw.NewReader(reader, lzw.LSB, 8)
+		defer r.Close()
+		reader = r
+	}
+	return io.ReadAll(reader)
 }
 
 // refreshSocialToken Social (GitHub/Google) token 刷新
@@ -180,6 +220,7 @@ func applyKiroSocialRefreshHeaders(req *http.Request, machineID string, account 
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "KiroIDE-"+config.KiroVersionForAccount(account)+"-"+machineID)
+	req.Header.Set("Accept-Encoding", "gzip, compress, deflate, br")
 	req.Header.Set("Connection", "close")
 	if req.URL != nil {
 		req.Host = req.URL.Host

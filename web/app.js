@@ -2551,6 +2551,7 @@
     const payload = {
       refreshToken: tokenData.refreshToken,
       accessToken: tokenData.accessToken || '',
+      machineId: tokenData.machineId || tokenData.machine_id || '',
       clientId: clientData?.clientId || '',
       clientSecret: clientData?.clientSecret || '',
       region: tokenData.region || '',
@@ -2607,6 +2608,7 @@
           kiroApiKey: kiroApiKey || item.accessToken || '',
           authMethod: 'api_key',
           provider: rawProvider || 'APIKey',
+          machineId: item.machineId || '',
           region: item.region || 'us-east-1'
         };
         try {
@@ -2638,6 +2640,7 @@
         email: item.email || '',
         userId: item.userId || '',
         nickname: item.nickname || '',
+        machineId: item.machineId || '',
         profileArn: item.profileArn || '',
         refreshToken: item.refreshToken,
         accessToken: item.accessToken || '',
@@ -2676,6 +2679,7 @@
       email: value('email'),
       userId: value('userId'),
       nickname: value('nickname'),
+      machineId: source.machineId || source.machine_id || value('machineId') || value('machine_id'),
       profileArn: value('profileArn'),
       accessToken: value('accessToken'),
       refreshToken: value('refreshToken'),

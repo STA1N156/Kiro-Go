@@ -3673,6 +3673,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		Email         string `json:"email"`
 		UserID        string `json:"userId"`
 		Nickname      string `json:"nickname"`
+		MachineId     string `json:"machineId"`
 		ProfileARN    string `json:"profileArn"`
 		AccessToken   string `json:"accessToken"`
 		RefreshToken  string `json:"refreshToken"`
@@ -3696,6 +3697,15 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
 	req.KiroApiKey = strings.TrimSpace(req.KiroApiKey)
 	req.AccessToken = strings.TrimSpace(req.AccessToken)
+	explicitMachineID := ""
+	if strings.TrimSpace(req.MachineId) != "" {
+		explicitMachineID = config.NormalizeMachineId(req.MachineId)
+		if explicitMachineID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "machineId must be a UUID or 64-character hex string"})
+			return
+		}
+	}
 	methodHint := strings.ToLower(strings.TrimSpace(req.AuthMethod))
 	isAPIKeyImport := req.KiroApiKey != "" ||
 		methodHint == "api_key" || methodHint == "apikey" ||
@@ -3736,15 +3746,17 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			accountID = auth.GenerateAccountID()
 		}
 		account := config.Account{
-			ID:         accountID,
-			Email:      strings.TrimSpace(req.Email),
-			UserId:     strings.TrimSpace(req.UserID),
-			Nickname:   strings.TrimSpace(req.Nickname),
-			KiroApiKey: req.KiroApiKey,
-			AuthMethod: "api_key",
-			Provider:   strings.TrimSpace(req.Provider),
-			Region:     strings.TrimSpace(req.Region),
-			Enabled:    true,
+			ID:              accountID,
+			Email:           strings.TrimSpace(req.Email),
+			UserId:          strings.TrimSpace(req.UserID),
+			Nickname:        strings.TrimSpace(req.Nickname),
+			KiroApiKey:      req.KiroApiKey,
+			AuthMethod:      "api_key",
+			Provider:        strings.TrimSpace(req.Provider),
+			Region:          strings.TrimSpace(req.Region),
+			MachineId:       explicitMachineID,
+			MachineIdLocked: explicitMachineID != "",
+			Enabled:         true,
 		}
 		if err := config.NormalizeAPIKeyAccount(&account); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -3890,14 +3902,16 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tempAccount := &config.Account{
-		RefreshToken:  req.RefreshToken,
-		ClientID:      req.ClientID,
-		ClientSecret:  req.ClientSecret,
-		AuthMethod:    req.AuthMethod,
-		Region:        req.Region,
-		TokenEndpoint: req.TokenEndpoint,
-		IssuerURL:     req.IssuerURL,
-		Scopes:        req.Scopes,
+		RefreshToken:    req.RefreshToken,
+		ClientID:        req.ClientID,
+		ClientSecret:    req.ClientSecret,
+		AuthMethod:      req.AuthMethod,
+		Region:          req.Region,
+		TokenEndpoint:   req.TokenEndpoint,
+		IssuerURL:       req.IssuerURL,
+		Scopes:          req.Scopes,
+		MachineId:       explicitMachineID,
+		MachineIdLocked: explicitMachineID != "",
 	}
 	accessToken, newRefreshToken, expiresAt, newProfileArn, err := auth.RefreshToken(tempAccount)
 	if err != nil {
@@ -3924,7 +3938,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		if tokenUserID != "" {
 			userID = tokenUserID
 		}
-	} else if tokenEmail, _, _ := auth.GetUserInfo(accessToken, req.RefreshToken, req.Region); tokenEmail != "" {
+	} else if tokenEmail, _, _ := auth.GetUserInfoWithMachine(accessToken, req.RefreshToken, req.Region, explicitMachineID); tokenEmail != "" {
 		email = tokenEmail
 	}
 
@@ -3982,7 +3996,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		Region:                  req.Region,
 		ExpiresAt:               expiresAt,
 		Enabled:                 true,
-		MachineId:               config.MachineIdForCredentials(req.RefreshToken, ""),
+		MachineId:               explicitMachineID,
+		MachineIdLocked:         explicitMachineID != "",
 		ProfileArn:              profileARN,
 		TokenEndpoint:           req.TokenEndpoint,
 		IssuerURL:               req.IssuerURL,

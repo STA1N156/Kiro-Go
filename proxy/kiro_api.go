@@ -477,6 +477,7 @@ func listKiroProfilesInRegionContext(
 		}
 		applyKiroManagementHeaders(req, account, "codewhispererruntime", "1")
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
 
 		resp, err := client.Do(req)
 		if err != nil {

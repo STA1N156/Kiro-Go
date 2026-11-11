@@ -305,6 +305,12 @@ func pollForToken(oidcBase, clientID, clientSecret, deviceCode string, interval 
 // GetUserInfo obtains the account identity from the current control-plane
 // usage endpoint.
 func GetUserInfo(accessToken, refreshToken, region string) (email, userID string, err error) {
+	return GetUserInfoWithMachine(accessToken, refreshToken, region, "")
+}
+
+// GetUserInfoWithMachine keeps the account's imported device fingerprint on
+// the control-plane lookup used while importing.
+func GetUserInfoWithMachine(accessToken, refreshToken, region, machineID string) (email, userID string, err error) {
 	region = strings.TrimSpace(region)
 	if region == "" {
 		region = "us-east-1"
@@ -317,7 +323,10 @@ func GetUserInfo(accessToken, refreshToken, region string) (email, userID string
 		return "", "", err
 	}
 	clientCfg := config.GetKiroClientConfig()
-	machineID := config.MachineIdForCredentials(refreshToken, "")
+	machineID = config.NormalizeMachineId(machineID)
+	if machineID == "" {
+		machineID = config.MachineIdForCredentials(refreshToken, "")
+	}
 	identity := "KiroIDE-" + clientCfg.KiroVersion
 	if machineID != "" {
 		identity += "-" + machineID
